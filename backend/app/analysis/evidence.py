@@ -5,6 +5,7 @@ sees. If an id is not in here, a citation naming it is invalid by definition.
 """
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from app.analysis.conflicts import ConflictingFix
 from app.analysis.temporal import TimelineAlignment, describe
@@ -16,6 +17,9 @@ from app.domain import (
     ResponseMode,
     Runbook,
 )
+
+if TYPE_CHECKING:
+    from app.analysis.gate import ConflictResolution, Support
 
 
 @dataclass(frozen=True)
@@ -122,12 +126,14 @@ class ExcludedCase:
     incident_id: str
     title: str
     reason: str
+    filter: str = "environment"
 
     def to_dict(self) -> dict[str, object]:
         return {
             "incident_id": self.incident_id,
             "title": self.title,
             "reason": self.reason,
+            "filter": self.filter,
         }
 
 
@@ -144,6 +150,8 @@ class EvidencePack:
     gate_reason: str
     escalate_to: str | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+    support: tuple["Support", ...] = ()
+    resolutions: tuple["ConflictResolution", ...] = ()
 
     def citation_ids(self) -> frozenset[str]:
         """Every id a recommendation is allowed to cite."""
@@ -157,8 +165,73 @@ class EvidencePack:
     def top(self) -> CandidateCase | None:
         return self.candidates[0] if self.candidates else None
 
+    @property
+    def supporting_ids(self) -> tuple[str, ...]:
+        return tuple(s.incident_id for s in self.support)
+
+    def resolution_for(self, conflict: ConflictingFix) -> "ConflictResolution | None":
+        return next(
+            (
+                r
+                for r in self.resolutions
+                if r.target == conflict.target and r.component == conflict.component
+            ),
+            None,
+        )
+
+    @property
+    def unresolved_conflicts(self) -> tuple[ConflictingFix, ...]:
+        return tuple(c for c in self.conflicts if self.resolution_for(c) is None)
+
+    def source_texts(self) -> dict[str, str]:
+        """The text behind every citable id, for checking what a step claims."""
+        texts: dict[str, str] = {}
+        for candidate in self.candidates:
+            incident = candidate.incident
+            texts[incident.incident_id] = "\n".join(
+                [
+                    incident.title,
+                    incident.summary,
+                    *incident.symptoms,
+                    *(f"{e.type.value} {e.service} {e.description}" for e in incident.events),
+                    incident.root_cause,
+                    incident.resolution,
+                    *(a.describe() for a in incident.actions),
+                    *(a.note or "" for a in incident.actions),
+                    *incident.related_services,
+                    *incident.tech_context,
+                ]
+            )
+            if candidate.postmortem:
+                pm = candidate.postmortem
+                texts[pm.postmortem_id] = "\n".join(
+                    [pm.root_cause, pm.impact, pm.resolution, *pm.lessons_learned]
+                )
+            for log in candidate.logs:
+                texts[log.log_id] = "\n".join([log.service, *log.lines])
+        for match in self.runbooks:
+            runbook = match.runbook
+            texts[runbook.runbook_id] = "\n".join(
+                [runbook.title, runbook.trigger, runbook.service or "", *runbook.steps]
+            )
+        return texts
+
     def to_dict(self) -> dict[str, object]:
         current = self.current
+        support = {s.incident_id: s for s in self.support}
+        candidates = []
+        for candidate in self.candidates:
+            entry = candidate.to_dict()
+            backing = support.get(candidate.incident.incident_id)
+            entry["supports_hypothesis"] = backing is not None
+            entry["support_reason"] = backing.reason if backing else None
+            candidates.append(entry)
+        conflicts = []
+        for conflict in self.conflicts:
+            entry = conflict.to_dict()
+            resolution = self.resolution_for(conflict)
+            entry["resolution"] = resolution.to_dict() if resolution else None
+            conflicts.append(entry)
         return {
             "current_incident": {
                 "title": current.title,
@@ -183,15 +256,27 @@ class EvidencePack:
                     for event in current.events
                 ],
                 "log_excerpt": current.log_excerpt,
+                "notes": list(current.notes),
+                "findings": [
+                    {
+                        "target": f.target,
+                        "component": f.component,
+                        "favours_incident_id": f.favours_incident_id,
+                        "observation": f.observation,
+                        "author": f.author,
+                    }
+                    for f in current.findings
+                ],
             },
             "mode": self.mode.value,
             "confidence": round(self.confidence, 3),
             "gate_reason": self.gate_reason,
             "escalate_to": self.escalate_to,
-            "candidates": [c.to_dict() for c in self.candidates],
+            "candidates": candidates,
             "runbooks": [r.to_dict() for r in self.runbooks],
-            "conflicts": [c.to_dict() for c in self.conflicts],
+            "conflicts": conflicts,
             "excluded": [e.to_dict() for e in self.excluded],
+            "support": [s.to_dict() for s in self.support],
             "unknowns": list(self.unknowns),
             "notes": list(self.notes),
             "citation_ids": sorted(self.citation_ids()),

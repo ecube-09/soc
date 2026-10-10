@@ -11,7 +11,7 @@ measured rather than eyeballed. Two modes:
 import json
 from dataclasses import dataclass, field
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.corpus import EvalCase, load_eval_cases
 from app.db import SqliteRepository
 from app.domain import ResponseMode
@@ -106,7 +106,49 @@ def add_generation_score(score: CaseScore, pack, result) -> CaseScore:
     return score
 
 
-async def run_eval(*, as_json: bool = False, with_generation: bool = False) -> int:
+def calibration(settings: Settings, repo: SqliteRepository) -> dict[str, object]:
+    """What the reported numbers rest on, stated next to them."""
+    origins = repo.origins()
+    return {
+        "hand_tuned": True,
+        "note": (
+            "Weights, threshold, half-life, and stale cutoff were set by hand so this "
+            "synthetic corpus behaves. These results show the pipeline does what it was "
+            "built to do on the labelled cases; they are not an accuracy estimate for "
+            "incidents the corpus was not written around. Run with --sensitivity to see "
+            "how close each outcome is to flipping."
+        ),
+        "weights": {name: getattr(settings, name) for name in WEIGHT_FIELDS},
+        "confidence_threshold": settings.confidence_threshold,
+        "recency_half_life_days": settings.recency_half_life_days,
+        "stale_after_days": settings.stale_after_days,
+        "conflict_confidence_penalty": settings.conflict_confidence_penalty,
+        "region_policy": settings.region_policy,
+        "embedding_model": settings.embedding_model,
+        "chat_model": settings.chat_model,
+        "eval_origin": settings.eval_origin,
+        "ignored_incidents_by_origin": {
+            origin: n for origin, n in origins.items() if origin != settings.eval_origin
+        },
+    }
+
+
+WEIGHT_FIELDS = (
+    "weight_semantic",
+    "weight_metadata",
+    "weight_timeline_sequence",
+    "weight_timeline_interval",
+    "weight_recency",
+    "weight_service_graph",
+)
+
+
+async def run_eval(
+    *,
+    as_json: bool = False,
+    with_generation: bool = False,
+    sensitivity: bool = False,
+) -> int:
     settings = get_settings()
     repo = SqliteRepository(settings.sqlite_abs_path)
     provider = build_provider(settings)
@@ -117,15 +159,20 @@ async def run_eval(*, as_json: bool = False, with_generation: bool = False) -> i
         return 1
 
     scores: list[CaseScore] = []
+    report = None
     try:
-        retriever = HybridRetriever(repo, store, provider, settings)
+        context = calibration(settings, repo)
+        retriever = HybridRetriever(
+            repo, store, provider, settings, origin=settings.eval_origin
+        )
         service = None
         if with_generation:
             from app.services import InvestigationService
 
             service = InvestigationService(retriever, provider, repo, settings)
 
-        for case in load_eval_cases():
+        cases = load_eval_cases()
+        for case in cases:
             pack = await retriever.build_evidence(case.incident)
             score = score_case(case, pack)
             if service is not None:
@@ -133,17 +180,71 @@ async def run_eval(*, as_json: bool = False, with_generation: bool = False) -> i
                     score, pack, await service.explain(pack)
                 )
             scores.append(score)
+
+        if sensitivity:
+            from app import sensitivity as sensitivity_check
+
+            report = await sensitivity_check.run(
+                repo=repo,
+                store=store,
+                provider=provider,
+                settings=settings,
+                cases=cases,
+                origin=settings.eval_origin,
+            )
     finally:
         await provider.aclose()
         repo.close()
 
     if as_json:
-        print(json.dumps([s.to_dict() for s in scores], indent=2))
+        print(
+            json.dumps(
+                {
+                    "calibration": context,
+                    "cases": [s.to_dict() for s in scores],
+                    "sensitivity": report.to_dict() if report else None,
+                },
+                indent=2,
+            )
+        )
     else:
+        _print_calibration(context)
         _print_report(scores, with_generation=with_generation)
+        if report:
+            from app import sensitivity as sensitivity_check
+
+            print()
+            sensitivity_check.print_report(report)
 
     failures = [s for s in scores if not _passed(s)]
     return 1 if failures else 0
+
+
+def _print_calibration(context: dict[str, object]) -> None:
+    print("Read this first")
+    print(f"  {context['note']}")
+    weights = context["weights"]
+    print(
+        "  weights: "
+        + ", ".join(f"{k.removeprefix('weight_')} {v}" for k, v in weights.items())
+    )
+    print(
+        f"  threshold {context['confidence_threshold']}, half-life "
+        f"{context['recency_half_life_days']}d, stale after {context['stale_after_days']}d, "
+        f"region policy {context['region_policy']}"
+    )
+    print(
+        f"  models: embeddings {context['embedding_model']}, chat {context['chat_model']}. "
+        "Re-run with --with-generation if either changes; the hashing embedder used "
+        "in tests does not prove a new embedding model keeps this ranking."
+    )
+    ignored = context["ignored_incidents_by_origin"]
+    if ignored:
+        print(
+            f"  scored against origin={context['eval_origin']} only; ignored "
+            + ", ".join(f"{n} {origin}" for origin, n in ignored.items())
+        )
+    print()
 
 
 def _passed(score: CaseScore) -> bool:

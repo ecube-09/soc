@@ -9,6 +9,7 @@ from app.domain import (
     CurrentIncident,
     Environment,
     EventType,
+    Finding,
     Incident,
     LogExcerpt,
     Postmortem,
@@ -80,6 +81,21 @@ def parse_current_incident(payload: dict[str, Any]) -> CurrentIncident:
         log_excerpt=payload.get("log_excerpt"),
         started_at=_dt(payload.get("started_at")),
         tech_context=tuple(payload.get("tech_context", ())),
+        notes=tuple(payload.get("notes", ())),
+        findings=tuple(parse_finding(f) for f in payload.get("findings", ())),
+    )
+
+
+def parse_finding(row: dict[str, Any]) -> Finding:
+    observation = str(row.get("observation") or "").strip()
+    if not observation:
+        raise ValueError("A finding needs the observation it is based on.")
+    return Finding(
+        target=row["target"],
+        component=row["component"],
+        favours_incident_id=row["favours_incident_id"],
+        observation=observation,
+        author=row.get("author"),
     )
 
 

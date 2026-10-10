@@ -1,11 +1,16 @@
 import { API_PREFIX } from "./health";
 import type {
+  Artifact,
+  CaseDetail,
+  CaseSummary,
   CorpusStats,
   CurrentIncident,
+  EvidenceKind,
   Example,
   InvestigationResponse,
   Service,
   Source,
+  TimelineExtraction,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -59,11 +64,74 @@ export function fetchSource(
 
 export function investigate(
   incident: CurrentIncident,
+  author: string | null,
   signal?: AbortSignal,
 ): Promise<InvestigationResponse> {
   return request<InvestigationResponse>("/investigations", {
     method: "POST",
-    body: JSON.stringify({ incident }),
+    body: JSON.stringify({ incident, author }),
     signal,
+  });
+}
+
+export function fetchCases(signal?: AbortSignal): Promise<CaseSummary[]> {
+  return request<CaseSummary[]>("/cases", { signal });
+}
+
+export function fetchCase(caseId: string, signal?: AbortSignal): Promise<CaseDetail> {
+  return request<CaseDetail>(`/cases/${encodeURIComponent(caseId)}`, { signal });
+}
+
+export function fetchRevision(
+  caseId: string,
+  revision: number,
+  signal?: AbortSignal,
+): Promise<InvestigationResponse> {
+  return request<InvestigationResponse>(
+    `/cases/${encodeURIComponent(caseId)}/investigations/${revision}`,
+    { signal },
+  );
+}
+
+export function addEvidence(
+  caseId: string,
+  kind: EvidenceKind,
+  payload: Record<string, unknown>,
+  author: string | null,
+): Promise<Omit<Artifact, "payload">> {
+  return request(`/cases/${encodeURIComponent(caseId)}/artifacts`, {
+    method: "POST",
+    body: JSON.stringify({ kind, payload, author }),
+  });
+}
+
+/** `incident` only when the form was edited; otherwise the case's own is re-used. */
+export function rerun(
+  caseId: string,
+  author: string | null,
+  incident?: CurrentIncident,
+): Promise<InvestigationResponse> {
+  return request<InvestigationResponse>(
+    `/cases/${encodeURIComponent(caseId)}/investigations`,
+    { method: "POST", body: JSON.stringify({ author, incident }) },
+  );
+}
+
+export function reportUrl(
+  caseId: string,
+  revision: number,
+  format: "markdown" | "text" = "markdown",
+): string {
+  return `${API_PREFIX}/cases/${encodeURIComponent(caseId)}/report?format=${format}&revision=${revision}`;
+}
+
+export function extractTimeline(
+  logText: string,
+  service: string,
+  date: string | null,
+): Promise<TimelineExtraction> {
+  return request<TimelineExtraction>("/timeline/extract", {
+    method: "POST",
+    body: JSON.stringify({ log_text: logText, service, date }),
   });
 }

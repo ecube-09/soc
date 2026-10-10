@@ -35,23 +35,28 @@ class HybridRetriever:
         store: VectorStore,
         provider: LLMProvider,
         settings: Settings,
+        *,
+        origin: str | None = None,
     ) -> None:
         self.repo = repo
         self.store = store
         self.provider = provider
         self.settings = settings
+        # When set, only knowledge with this origin is eligible. The eval uses it
+        # so imported outside text can never move a labelled score.
+        self.origin = origin
 
     async def build_evidence(
         self, current: CurrentIncident, *, now: datetime | None = None
     ) -> EvidencePack:
         now = now or self._reference_now(current)
         graph = ServiceGraph.from_services(self.repo.services())
-        incidents = self.repo.incidents()
-        runbooks = self.repo.runbooks()
+        incidents = [i for i in self.repo.incidents() if self._eligible(i.origin)]
+        runbooks = [r for r in self.repo.runbooks() if self._eligible(r.origin)]
 
         semantic, runbook_similarity = await self._similarity(current)
 
-        kept, excluded = self._filter_environment(
+        kept, excluded = self._filter_scope(
             current, self._candidate_incidents(current, incidents, semantic, graph)
         )
         candidates = self._score(current, kept, semantic, graph, now=now)
@@ -74,9 +79,10 @@ class HybridRetriever:
             runbooks=runbook_matches,
             conflicts=found_conflicts,
             settings=self.settings,
+            findings=current.findings,
         )
 
-        notes: list[str] = []
+        notes: list[str] = list(decision.notes)
         if not graph.knows(current.service):
             notes.append(
                 f"{current.service} is not in the service map, so dependency-based "
@@ -95,7 +101,12 @@ class HybridRetriever:
             gate_reason=decision.reason,
             escalate_to=decision.escalate_to,
             notes=tuple(notes),
+            support=decision.support,
+            resolutions=decision.resolutions,
         )
+
+    def _eligible(self, origin: str) -> bool:
+        return self.origin is None or origin == self.origin
 
     async def _similarity(
         self, current: CurrentIncident
@@ -166,16 +177,18 @@ class HybridRetriever:
 
         return list(selected.values())
 
-    def _filter_environment(
+    def _filter_scope(
         self, current: CurrentIncident, incidents: list[Incident]
     ) -> tuple[list[Incident], list[ExcludedCase]]:
-        """A staging case is the wrong case, however well the words line up."""
+        """A staging case is the wrong case, however well the words line up.
+
+        Region is a hard filter only when the policy says so. Either way the
+        decision is reported, never silent.
+        """
         kept: list[Incident] = []
         excluded: list[ExcludedCase] = []
         for incident in incidents:
-            if incident.environment == current.environment:
-                kept.append(incident)
-            else:
+            if incident.environment != current.environment:
                 excluded.append(
                     ExcludedCase(
                         incident_id=incident.incident_id,
@@ -184,8 +197,25 @@ class HybridRetriever:
                             f"{incident.environment.value} incident, current is "
                             f"{current.environment.value}"
                         ),
+                        filter="environment",
                     )
                 )
+            elif self.settings.region_policy == "require" and scoring.region_differs(
+                current, incident
+            ):
+                excluded.append(
+                    ExcludedCase(
+                        incident_id=incident.incident_id,
+                        title=incident.title,
+                        reason=(
+                            f"{incident.region} incident, current is {current.region} "
+                            "(region policy: require)"
+                        ),
+                        filter="region",
+                    )
+                )
+            else:
+                kept.append(incident)
         return kept, excluded
 
     def _score(
@@ -232,6 +262,8 @@ class HybridRetriever:
                 flags.append("dependency")
             if alignment.matched and alignment.sequence_score >= 0.7:
                 flags.append("timeline-match")
+            if scoring.region_differs(current, incident):
+                flags.append("other-region")
 
             scored.append(
                 CandidateCase(
@@ -332,6 +364,8 @@ def query_text(current: CurrentIncident) -> str:
         parts.append(f"timeline anchored on {anchor}: {shape}")
     if current.tech_context:
         parts.append("stack: " + ", ".join(current.tech_context))
+    if current.notes:
+        parts.append("engineer notes: " + "; ".join(current.notes))
     if current.log_excerpt:
         parts.append("logs:\n" + current.log_excerpt)
     return "\n".join(parts)

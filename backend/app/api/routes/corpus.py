@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException
 
-from app.api.deps import RepositoryDep, VectorStoreDep
+from app.api.deps import RepositoryDep, SettingsDep, VectorStoreDep
 from app.corpus import load_eval_cases
 from app.domain import (
     RESERVED_ARTIFACT_KINDS,
@@ -75,12 +75,17 @@ async def list_examples() -> list[ExampleOut]:
 
 
 @router.get("/stats", response_model=CorpusStatsOut)
-async def stats(repo: RepositoryDep, store: VectorStoreDep) -> CorpusStatsOut:
+async def stats(
+    repo: RepositoryDep, store: VectorStoreDep, settings: SettingsDep
+) -> CorpusStatsOut:
     return CorpusStatsOut(
         counts=repo.counts(),
         indexed_chunks=store.count(),
         supported_artifact_kinds=sorted(k.value for k in SUPPORTED_ARTIFACT_KINDS),
         reserved_artifact_kinds=sorted(k.value for k in RESERVED_ARTIFACT_KINDS),
+        origins=repo.origins(),
+        region_policy=settings.region_policy,
+        eval_origin=settings.eval_origin,
     )
 
 

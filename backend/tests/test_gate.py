@@ -12,6 +12,7 @@ from app.domain import (
     ActionDirection,
     Environment,
     EventType,
+    Finding,
     Incident,
     ResolutionAction,
     ResponseMode,
@@ -43,10 +44,17 @@ def timeline():
 
 
 def candidate(
-    score: float, *, flags=(), events=None, incident_id="INC-9001", age_days=10
+    score: float,
+    *,
+    flags=(),
+    events=None,
+    incident_id="INC-9001",
+    age_days=10,
+    related=(),
 ):
     events = timeline() if events is None else events
     incident = Incident(
+        related_services=related,
         incident_id=incident_id,
         title="Test case",
         summary="",
@@ -173,12 +181,13 @@ def test_missing_timeline_is_discounted_and_named(settings):
     assert "No event timeline was provided" in decision.unknowns[0]
 
 
-def test_conflict_is_charged_against_confidence_with_the_deciding_question(settings):
+def test_conflict_is_charged_against_confidence_but_stated_only_once(settings):
+    """The conflict lives in the conflict list; repeating it as an unknown is noise."""
     decision = decide(settings, conflicts=[conflict()])
 
     assert decision.confidence == pytest.approx(0.85 - settings.conflict_confidence_penalty)
     assert "unresolved conflicting remediation" in decision.reason
-    assert "measure utilisation first" in decision.unknowns[0]
+    assert not any("measure utilisation first" in u for u in decision.unknowns)
 
 
 def test_conflicts_can_push_a_good_match_over_into_escalation(settings):
@@ -229,4 +238,99 @@ def test_supporting_count_only_includes_cases_near_the_top_score(settings):
         ],
     )
 
-    assert "2 supporting case(s)" in decision.reason
+    assert decision.supporting_ids == ("INC-9001", "INC-9002")
+    assert "1 other case(s) share its failure shape: INC-9002" in decision.reason
+
+
+def test_same_service_with_a_different_dependency_is_not_support(settings):
+    """A payment-api slow query is a neighbour of a payment-api Redis outage, not support."""
+    redis = candidate(0.85, incident_id="INC-9001", related=("redis-cache",))
+    postgres = candidate(0.84, incident_id="INC-9002", related=("postgres-primary",))
+    also_redis = candidate(0.80, incident_id="INC-9003", related=("redis-cache",))
+
+    decision = decide(settings, candidates=[redis, postgres, also_redis])
+
+    assert decision.supporting_ids == ("INC-9001", "INC-9003")
+    assert "INC-9002" not in decision.reason
+
+
+def test_a_different_timeline_shape_is_not_support(settings):
+    other_shape = tuple(
+        TimelineEvent(
+            at=datetime(2026, 9, 1, 10, 0) + timedelta(minutes=i),
+            type=EventType.MITIGATION,
+            service="payment-api",
+            description="",
+        )
+        for i in range(3)
+    )
+    decision = decide(
+        settings,
+        candidates=[
+            candidate(0.85, incident_id="INC-9001"),
+            candidate(0.84, incident_id="INC-9002", events=other_shape),
+        ],
+    )
+
+    assert decision.supporting_ids == ("INC-9001",)
+    assert "no other case shares its failure shape" in decision.reason
+
+
+def finding(favours: str, observation: str = "pool=50/50 on every replica"):
+    return Finding(
+        target="redis_connection_pool_size",
+        component="payment-api",
+        favours_incident_id=favours,
+        observation=observation,
+        author="asha",
+    )
+
+
+def test_a_finding_for_the_top_case_removes_the_conflict_penalty(settings):
+    decision = decide(settings, conflicts=[conflict()], findings=(finding("INC-9001"),))
+
+    assert decision.confidence == pytest.approx(0.85)
+    assert decision.resolutions[0].favours_incident_id == "INC-9001"
+    assert "settled by a recorded measurement in favour of INC-9001" in decision.reason
+
+
+def test_a_finding_against_the_top_case_escalates(settings):
+    """The measurement says the other side applies, so the leading match does not fit."""
+    decision = decide(settings, conflicts=[conflict()], findings=(finding("INC-9002"),))
+
+    assert decision.mode is ResponseMode.ESCALATION
+    assert decision.confidence == pytest.approx(0.85 * settings.contradicted_top_factor)
+    assert "favours INC-9002 over INC-9001" in decision.reason
+    assert any("pool=50/50" in u for u in decision.unknowns)
+
+
+def test_a_finding_can_lift_an_escalation_back_into_an_investigation(settings):
+    unresolved = decide(settings, candidates=[candidate(0.55)], conflicts=[conflict()])
+    settled = decide(
+        settings,
+        candidates=[candidate(0.55)],
+        conflicts=[conflict()],
+        findings=(finding("INC-9001"),),
+    )
+
+    assert unresolved.mode is ResponseMode.ESCALATION
+    assert settled.mode is ResponseMode.INVESTIGATION
+
+
+def test_the_latest_finding_on_a_knob_wins(settings):
+    decision = decide(
+        settings,
+        conflicts=[conflict()],
+        findings=(finding("INC-9002"), finding("INC-9001", "re-measured")),
+    )
+
+    assert decision.mode is ResponseMode.INVESTIGATION
+    assert decision.resolutions[0].observation == "re-measured"
+
+
+def test_a_finding_naming_neither_side_is_not_applied(settings):
+    decision = decide(settings, conflicts=[conflict()], findings=(finding("INC-4242"),))
+
+    assert decision.confidence == pytest.approx(0.85 - settings.conflict_confidence_penalty)
+    assert decision.resolutions == ()
+    assert "not a side of this conflict" in decision.notes[0]

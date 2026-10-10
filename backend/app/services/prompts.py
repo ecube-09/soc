@@ -48,8 +48,9 @@ name one. Your job here is narrower:
 - Set root_cause_status to "undetermined" and leave root_cause_hypothesis empty.
 - In "headline", state what is happening in one sentence using only the reported
   symptoms.
-- In "steps", give the checks that would narrow this down, each cited. If the
-  evidence supports no cited check at all, return an empty list.
+- In "steps", give the checks that would narrow this down, each citing the case
+  ids it rests on in "cases" and any runbook ids in "runbooks". If the evidence
+  supports no cited check at all, return an empty list.
 - In "unresolved", state plainly what could not be determined and why.
 """
 
@@ -61,57 +62,95 @@ evidence is strong enough to reason from. Do not re-litigate that. Produce:
   resembles. Not a title, not a heading.
 - "root_cause_status": "hypothesis". Use "undetermined" only if the comparable
   cases genuinely explain nothing about these symptoms.
-- "root_cause_hypothesis": the likely cause, naming the case that suggests it.
-- "steps": ordered checks, each with a rationale and citations. Put the check
-  that would falsify the hypothesis early. Cite the historical case that makes a
-  step relevant, not only the runbook the wording came from, and do not simply
-  transcribe a runbook end to end.
-- "cautions": anything that would make a step risky or misleading, including
-  conflicting historical guidance and stale remediation.
-- "unresolved": what remains unknown even if the hypothesis is right.
+- "root_cause_hypothesis": the likely cause in one or two sentences, naming the
+  supporting case id it rests on. State a cause, not a fix.
+- "steps": at most {max_steps} checks, fewest first that would decide the
+  question. Put the historical case ids a step rests on (INC-, PM-, LOG-, or
+  EXT- for an imported case) in "cases" - at least one, and the case must
+  describe what the step checks - and any runbook ids in "runbooks". In "would_falsify", say what result of the
+  check would count against the hypothesis. The engineer already sees the
+  runbooks in full: do not restate runbook steps, and do not propose changing a
+  setting that the CONFLICTING HISTORICAL GUIDANCE section lists as disputed.
+- "cautions": what would make a step risky or misleading, such as stale
+  remediation. Do not restate the conflicting guidance; the engineer sees it in
+  its own panel.
+- "unresolved": what remains unknown even if the hypothesis is right, other than
+  the conflicting guidance already listed.
 """
 
-RESPONSE_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "properties": {
-        "headline": {"type": "string"},
-        "root_cause_status": {
-            "type": "string",
-            "enum": ["hypothesis", "undetermined"],
-        },
-        "root_cause_hypothesis": {"type": "string"},
-        "steps": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string"},
-                    "rationale": {"type": "string"},
-                    "citations": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["action", "rationale", "citations"],
+def response_schema(pack: EvidencePack) -> dict[str, object]:
+    """The draft's JSON shape, with citations limited to this pack's ids.
+
+    Ollama compiles the schema into a grammar, so a step cannot be emitted
+    without naming a retrieved case. Whether that case says what the step
+    claims is still decided after generation.
+    """
+    runbook_ids = sorted(m.runbook.runbook_id for m in pack.runbooks)
+    case_ids = sorted(i for i in pack.citation_ids() if i not in runbook_ids)
+    return {
+        "type": "object",
+        "properties": {
+            "headline": {"type": "string"},
+            "root_cause_status": {
+                "type": "string",
+                "enum": ["hypothesis", "undetermined"],
             },
+            "root_cause_hypothesis": {"type": "string"},
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "rationale": {"type": "string"},
+                        "would_falsify": {"type": "string"},
+                        "cases": _id_list(case_ids, minimum=1),
+                        "runbooks": _id_list(runbook_ids, minimum=0),
+                    },
+                    "required": ["action", "rationale", "would_falsify", "cases"],
+                },
+            },
+            "cautions": {"type": "array", "items": {"type": "string"}},
+            "unresolved": {"type": "array", "items": {"type": "string"}},
+            "requested_team": {"type": "string"},
         },
-        "cautions": {"type": "array", "items": {"type": "string"}},
-        "unresolved": {"type": "array", "items": {"type": "string"}},
-        "requested_team": {"type": "string"},
-    },
-    "required": [
-        "headline",
-        "root_cause_status",
-        "root_cause_hypothesis",
-        "steps",
-        "cautions",
-        "unresolved",
-    ],
-}
+        "required": [
+            "headline",
+            "root_cause_status",
+            "root_cause_hypothesis",
+            "steps",
+            "cautions",
+            "unresolved",
+        ],
+    }
 
 
-def build_user_prompt(pack: EvidencePack) -> str:
+def _id_list(ids: list[str], *, minimum: int) -> dict[str, object]:
+    if not ids:
+        return {"type": "array", "items": {"type": "string"}, "maxItems": 0}
+    schema: dict[str, object] = {"type": "array", "items": {"type": "string", "enum": ids}}
+    if minimum:
+        schema["minItems"] = minimum
+    return schema
+
+
+def build_repair_prompt(reasons: list[str]) -> str:
+    lines = "\n".join(f"- {reason}" for reason in reasons) or "- (no reasons recorded)"
+    return (
+        "Every step in that draft was removed by the evidence checks:\n"
+        f"{lines}\n\n"
+        "Write the JSON again. Each step must cite at least one INC-, PM-, LOG- or "
+        "EXT- id from the cases listed above, the cited case must actually describe "
+        "what the step checks, and no step may propose moving a disputed setting. "
+        "Prefer measurements that would tell the comparable cases apart."
+    )
+
+
+def build_user_prompt(pack: EvidencePack, *, max_steps: int = 4) -> str:
     instruction = (
         ESCALATION_INSTRUCTION
         if pack.mode is ResponseMode.ESCALATION
-        else INVESTIGATION_INSTRUCTION
+        else INVESTIGATION_INSTRUCTION.format(max_steps=max_steps)
     )
     return "\n".join(
         [
@@ -160,6 +199,9 @@ def _current_section(pack: EvidencePack) -> str:
     if current.log_excerpt:
         lines.append("Log excerpt:")
         lines += [f"  {line}" for line in current.log_excerpt.splitlines()]
+    if current.notes:
+        lines.append("Engineer notes added during the investigation:")
+        lines += [f"  - {note}" for note in current.notes]
     return "\n".join(lines) + "\n"
 
 
@@ -246,7 +288,15 @@ def _conflicts_section(pack: EvidencePack) -> str:
             lines.append(
                 f"    [{side.incident_id}] {side.action.describe()} — {side.root_cause}"
             )
-        lines.append(f"    Deciding check: {conflict.distinguishing_question}")
+        resolution = pack.resolution_for(conflict)
+        if resolution:
+            lines.append(
+                f"    Settled by an engineer's measurement in favour of "
+                f"{resolution.favours_incident_id}: {resolution.observation}. Do not "
+                f"recommend what {resolution.rejected_incident_id} did."
+            )
+        else:
+            lines.append(f"    Deciding check: {conflict.distinguishing_question}")
     lines.append("")
     return "\n".join(lines)
 
@@ -258,6 +308,12 @@ def _gate_section(pack: EvidencePack) -> str:
         f"Confidence: {pack.confidence:.2f}",
         f"Assessment: {pack.gate_reason}",
     ]
+    if pack.support:
+        lines.append(
+            "Cases that support the leading hypothesis: "
+            + ", ".join(pack.supporting_ids)
+            + ". Other listed cases are neighbours, not support."
+        )
     if pack.unknowns:
         lines.append("Known gaps:")
         lines += [f"  - {unknown}" for unknown in pack.unknowns]

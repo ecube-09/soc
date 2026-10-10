@@ -10,6 +10,7 @@ import {
   type Service,
   type TimelineEventInput,
 } from "../api/types";
+import { TimelineProposals } from "./TimelineProposals";
 
 interface Props {
   incident: CurrentIncident;
@@ -19,6 +20,9 @@ interface Props {
   examples: Example[];
   services: Service[];
   busy: boolean;
+  regionPolicy: "prefer" | "require" | null;
+  /** Set when a case is open; the button then starts a separate case. */
+  openCaseId: string | null;
 }
 
 export function IncidentForm({
@@ -29,6 +33,8 @@ export function IncidentForm({
   examples,
   services,
   busy,
+  regionPolicy,
+  openCaseId,
 }: Props) {
   const [showTimeline, setShowTimeline] = useState(true);
   const set = <K extends keyof CurrentIncident>(
@@ -183,7 +189,16 @@ export function IncidentForm({
               placeholder="redis-cache"
             />
           </Field>
-          <Field label="Region">
+          <Field
+            label="Region"
+            hint={
+              regionPolicy === "require"
+                ? "Required match"
+                : regionPolicy === "prefer"
+                  ? "Preferred, not required"
+                  : undefined
+            }
+          >
             <input
               className="input input-sm w-full"
               value={incident.region ?? ""}
@@ -312,16 +327,29 @@ export function IncidentForm({
             onChange={(event) => set("log_excerpt", event.target.value || null)}
             placeholder="Paste the lines around the onset."
           />
+          <TimelineProposals
+            logText={incident.log_excerpt ?? ""}
+            service={incident.service}
+            date={(incident.started_at ?? incident.events[0]?.at ?? "").slice(0, 10) || null}
+            onAccept={(events) =>
+              set(
+                "events",
+                [...incident.events, ...events].sort((a, b) => a.at.localeCompare(b.at)),
+              )
+            }
+          />
         </Field>
 
       </div>
       <div className="shrink-0 border-t border-base-300 bg-base-100 px-5 py-3">
         <button type="submit" className="btn btn-primary w-full" disabled={busy}>
           {busy && <span className="loading loading-spinner loading-xs" />}
-          {busy ? "Investigating" : "Investigate"}
+          {busy ? "Investigating" : openCaseId ? "Investigate as a new case" : "Investigate"}
         </button>
         <p className="mt-2 text-center text-[11px] text-base-content/40">
-          Proposes what to check. Does not change anything.
+          {openCaseId
+            ? `To keep ${openCaseId}, use Re-run; edits here are sent with it.`
+            : "Proposes what to check. Does not change anything."}
         </p>
       </div>
     </form>

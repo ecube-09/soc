@@ -12,6 +12,7 @@ not determine this" than a confident guess.
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -22,11 +23,12 @@ from app.db.repository import SqliteRepository
 from app.domain import CurrentIncident, ResponseMode, RootCauseStatus
 from app.llm import ChatMessage, LLMError, LLMProvider
 from app.retrieval import HybridRetriever
-from app.services import prompts
+from app.services import faithfulness, prompts
 from app.services.reports import (
     EscalationReport,
     InvestigationResult,
     InvestigationStep,
+    conflict_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,18 +57,66 @@ class InvestigationService:
 
     async def explain(self, pack: EvidencePack) -> InvestigationResult:
         draft, notes = await self._generate(pack)
-        return self._finalise(pack, draft, notes)
+        result = self._finalise(pack, draft, list(notes))
+        if not (draft and self._lost_every_step(pack, result)):
+            return result
+
+        # The evidence carried an investigation and only the draft's form lost
+        # it, so the model gets the reasons once. The second draft goes through
+        # the same checks; if it fails too, the escalation stands.
+        reasons = [n for n in result.validation_notes if n.startswith("Dropped")]
+        retry, retry_notes = await self._generate(pack, previous=draft, reasons=reasons)
+        if not retry:
+            return result
+        second = self._finalise(pack, retry, [*notes, *retry_notes])
+        if not second.steps:
+            return replace(
+                result,
+                validation_notes=(
+                    *result.validation_notes,
+                    "The model was shown these reasons and asked once more; the "
+                    "second draft lost every step too, so the escalation stands.",
+                ),
+            )
+        return replace(
+            second,
+            validation_notes=(
+                f"Every step in the first draft was dropped ({len(reasons)} reason(s)); "
+                "the model was shown the reasons and asked once more.",
+                *second.validation_notes,
+            ),
+        )
+
+    def _lost_every_step(self, pack: EvidencePack, result: InvestigationResult) -> bool:
+        return (
+            self.settings.repair_attempts > 0
+            and pack.mode is ResponseMode.INVESTIGATION
+            and result.mode is ResponseMode.ESCALATION
+            and not result.steps
+        )
 
     async def _generate(
-        self, pack: EvidencePack
+        self,
+        pack: EvidencePack,
+        *,
+        previous: dict[str, Any] | None = None,
+        reasons: list[str] | None = None,
     ) -> tuple[dict[str, Any], list[str]]:
         messages = [
             ChatMessage(role="system", content=prompts.SYSTEM_PROMPT),
-            ChatMessage(role="user", content=prompts.build_user_prompt(pack)),
+            ChatMessage(
+                role="user",
+                content=prompts.build_user_prompt(pack, max_steps=self.settings.max_steps),
+            ),
         ]
+        if previous is not None:
+            messages += [
+                ChatMessage(role="assistant", content=json.dumps(previous)),
+                ChatMessage(role="user", content=prompts.build_repair_prompt(reasons or [])),
+            ]
         try:
             raw = await self.provider.chat(
-                messages, json_schema=prompts.RESPONSE_SCHEMA, temperature=0.0
+                messages, json_schema=prompts.response_schema(pack), temperature=0.0
             )
         except LLMError as exc:
             logger.warning("generation failed, falling back to the report: %s", exc)
@@ -96,7 +146,27 @@ class InvestigationService:
         notes.extend(step_notes)
 
         claimed = _read_status(draft)
-        hypothesis = _text(draft.get("root_cause_hypothesis"))
+        raw_hypothesis = _text(draft.get("root_cause_hypothesis"))
+
+        # Past "the id was retrieved": does the cited text say it, does the plan
+        # pick a side of a conflict, is the cause grounded in a supporting case.
+        checked = faithfulness.check(
+            pack,
+            steps=steps,
+            hypothesis=raw_hypothesis if pack.mode is ResponseMode.INVESTIGATION else None,
+            cautions=_strings(draft.get("cautions")),
+            unresolved=_strings(draft.get("unresolved")),
+            max_steps=self.settings.max_steps,
+            citation_support_min=self.settings.citation_support_min,
+            hypothesis_grounding_min=self.settings.hypothesis_grounding_min,
+            investigation=pack.mode is ResponseMode.INVESTIGATION,
+        )
+        notes.extend(checked.notes)
+        steps = checked.steps
+        hypothesis = (
+            checked.hypothesis if pack.mode is ResponseMode.INVESTIGATION else raw_hypothesis
+        )
+        removed_by_checks = bool(raw_hypothesis) and not hypothesis
         mode = pack.mode
 
         # The gate runs again here, on what the model actually produced. The
@@ -122,10 +192,11 @@ class InvestigationService:
                 )
         else:
             status = RootCauseStatus.UNDETERMINED
-            notes.append(
-                "The evidence supported a hypothesis but none was stated, so "
-                "nothing is being claimed."
-            )
+            if not removed_by_checks:
+                notes.append(
+                    "The evidence supported a hypothesis but none was stated, so "
+                    "nothing is being claimed."
+                )
 
         if mode is ResponseMode.INVESTIGATION and not steps:
             notes.append(
@@ -141,12 +212,23 @@ class InvestigationService:
             )
             mode = ResponseMode.ESCALATION
 
+        basis = checked.hypothesis_basis
         if mode is ResponseMode.ESCALATION:
-            status, hypothesis = RootCauseStatus.UNDETERMINED, None
+            status, hypothesis, basis = RootCauseStatus.UNDETERMINED, None, ()
 
-        unresolved = _merge(pack.unknowns, _strings(draft.get("unresolved")))
-        cautions = _strings(draft.get("cautions"))
-        headline = _text(draft.get("headline")) or _fallback_headline(pack)
+        unresolved = _merge(pack.unknowns, checked.unresolved)
+        cautions = checked.cautions
+        headline = _text(draft.get("headline"))
+        if headline and _looks_like_title(headline):
+            notes.append(
+                f"The model's headline \"{_clip(headline)}\" was a title, not a "
+                "statement; replaced with one built from the evidence."
+            )
+            headline = None
+        headline = headline or _fallback_headline(pack)
+        if mode is not pack.mode:
+            # The model's headline was written for a mode the checks overturned.
+            headline = _fallback_headline(pack, mode)
 
         escalation = None
         if mode is ResponseMode.ESCALATION:
@@ -170,6 +252,7 @@ class InvestigationService:
             evidence=pack,
             escalation=escalation,
             validation_notes=tuple(notes),
+            hypothesis_basis=basis,
         )
 
 
@@ -190,7 +273,11 @@ def _validate_steps(
         if not action:
             continue
 
-        cited = _strings(entry.get("citations"))
+        cited = (
+            _strings(entry.get("cases"))
+            + _strings(entry.get("runbooks"))
+            + _strings(entry.get("citations"))
+        )
         kept = tuple(dict.fromkeys(c for c in cited if c in allowed))
         invented = [c for c in cited if c not in allowed]
         if invented:
@@ -210,6 +297,7 @@ def _validate_steps(
                 action=action,
                 rationale=_text(entry.get("rationale")) or "",
                 citations=kept,
+                would_falsify=_text(entry.get("would_falsify")) or "",
             )
         )
 
@@ -248,12 +336,14 @@ def _build_escalation(
             f"[{match.runbook.runbook_id}] {match.runbook.title} "
             f"(trigger: {match.runbook.trigger})"
         )
-    for conflict in pack.conflicts:
-        evidence.append(f"Conflicting guidance on {conflict.target}: {conflict.summary}")
-    if pack.excluded:
+    for filter_name in ("environment", "region"):
+        dropped = [e.incident_id for e in pack.excluded if e.filter == filter_name]
+        if dropped:
+            evidence.append(f"Excluded by {filter_name} filter: " + ", ".join(dropped[:5]))
+    if pack.support:
         evidence.append(
-            "Excluded by environment filter: "
-            + ", ".join(e.incident_id for e in pack.excluded[:5])
+            "Cases sharing the closest match's failure shape: "
+            + ", ".join(s.incident_id for s in pack.support)
         )
     # Retrieval limitations belong in the report; the receiving team needs to
     # know what the search could not do, not just what it found.
@@ -283,12 +373,13 @@ def _build_escalation(
         requested_team=requested_team or pack.escalate_to or DEFAULT_TEAM,
         recommended_next_investigation=next_checks,
         citations=tuple(sorted(pack.citation_ids())),
+        conflicting_guidance=conflict_lines(pack),
     )
 
 
-def _fallback_headline(pack: EvidencePack) -> str:
+def _fallback_headline(pack: EvidencePack, mode: ResponseMode | None = None) -> str:
     current = pack.current
-    if pack.mode is ResponseMode.ESCALATION:
+    if (mode or pack.mode) is ResponseMode.ESCALATION:
         return (
             f"{current.service} in {current.environment.value}: root cause "
             "undetermined from the available evidence."
@@ -296,10 +387,25 @@ def _fallback_headline(pack: EvidencePack) -> str:
     top = pack.top
     return (
         f"{current.service} in {current.environment.value} resembles "
-        f"{top.incident.incident_id}."
+        f"{top.incident.incident_id}: {top.incident.title}."
         if top
         else f"{current.service} in {current.environment.value}."
     )
+
+
+_MINOR_WORDS = frozenset({"a", "an", "and", "the", "of", "for", "in", "on", "to", "with", "after"})
+_HEADING_NOUNS = frozenset({"analysis", "report", "summary", "overview", "investigation", "resolution"})
+
+
+def _looks_like_title(text: str) -> bool:
+    """Unpunctuated and either Capitalised Like A Heading or named like a document."""
+    words = text.split()
+    if text.rstrip().endswith((".", "!", "?")) or len(words) > 16:
+        return False
+    if any(w.lower().strip(":,") in _HEADING_NOUNS for w in words):
+        return True
+    major = [w for w in words if w.lower() not in _MINOR_WORDS]
+    return bool(major) and all(w[0].isupper() or not w[0].isalpha() for w in major)
 
 
 def _read_status(draft: dict[str, Any]) -> RootCauseStatus:

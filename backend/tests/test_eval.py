@@ -98,6 +98,43 @@ async def test_weak_case_needs_no_retrieval_metrics(retriever, eval_cases):
     assert _passed(score)
 
 
+def test_calibration_says_the_numbers_were_hand_tuned(settings, repo):
+    from app.eval import calibration
+
+    context = calibration(settings, repo)
+
+    assert context["hand_tuned"] is True
+    assert "set by hand" in context["note"]
+    assert context["confidence_threshold"] == settings.confidence_threshold
+    assert set(context["weights"]) >= {"weight_semantic", "weight_recency"}
+
+
+async def test_sensitivity_reports_flips_per_perturbation(
+    repo, settings, provider, eval_cases, retriever
+):
+    from app import sensitivity
+    from app.sensitivity import Perturbation
+
+    report = await sensitivity.run(
+        repo=repo,
+        store=retriever.store,
+        provider=provider,
+        settings=settings,
+        cases=list(eval_cases.values()),
+        origin="synthetic",
+        perturbations=[
+            Perturbation("no-op", "weight_semantic", lambda v: v),
+            Perturbation("threshold to 0.95", "confidence_threshold", lambda v: 0.95),
+        ],
+    )
+
+    noop, strict = report.rows
+    assert noop.stable
+    assert strict.mode_flips, "a 0.95 threshold must turn investigations into escalations"
+    assert strict.failing
+    assert set(report.margins) == set(eval_cases)
+
+
 async def test_generation_scoring_counts_only_surviving_citations(
     retriever, repo, settings, provider, eval_cases
 ):

@@ -340,6 +340,37 @@
     ]
   },
   {
+    "incident_id": "INC-1338",
+    "title": "Payment API 503s in eu-west-1 during a regional traffic shift",
+    "summary": "payment-api in eu-west-1 returned 503 on authorisations after a planned traffic shift moved most European volume onto a region provisioned for a fraction of it. Redis client pools filled first.",
+    "severity": "SEV-2",
+    "service": "payment-api",
+    "environment": "production",
+    "region": "eu-west-1",
+    "started_at": "2026-05-02T09:20:00",
+    "resolved_at": "2026-05-02T10:05:00",
+    "root_cause": "The traffic shift tripled request volume in eu-west-1 without scaling payment-api there. Per-replica Redis client pools exhausted under the extra load; Redis itself had headroom.",
+    "resolution": "Shifted traffic weight back toward ap-south-1 and scheduled regional capacity before the next shift.",
+    "symptoms": [
+      "HTTP 503 rate 27% in eu-west-1 only",
+      "redis client timeout waiting for connection from pool",
+      "request rate 3x the regional baseline",
+      "ap-south-1 healthy"
+    ],
+    "related_services": ["redis-cache"],
+    "tech_context": ["Redis 7.2", "Kubernetes 1.30", "payment-api v2.6.4"],
+    "events": [
+      {"at": "2026-05-02T09:20:00", "type": "latency_spike", "service": "payment-api", "description": "eu-west-1 p99 latency rose as shifted traffic arrived."},
+      {"at": "2026-05-02T09:24:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Redis pool checkout timeouts in eu-west-1 pods."},
+      {"at": "2026-05-02T09:26:00", "type": "error_spike", "service": "payment-api", "description": "503 rate in eu-west-1 reached 27%."},
+      {"at": "2026-05-02T09:31:00", "type": "alert", "service": "payment-api", "description": "Alert PAY-5XX-EU paged the payments on-call."},
+      {"at": "2026-05-02T09:48:00", "type": "mitigation", "service": "payment-api", "description": "Traffic weight returned to ap-south-1."}
+    ],
+    "actions": [
+      {"component": "payment-api", "target": "eu_west_1_traffic_weight", "direction": "decrease", "from_value": "70%", "to_value": "30%", "note": "Region capacity, not pool size, was the constraint."}
+    ]
+  },
+  {
     "incident_id": "INC-1150",
     "title": "Postgres primary disk pressure from WAL retention",
     "summary": "WAL files filled the primary data volume to 96%, putting the cluster minutes away from refusing writes.",

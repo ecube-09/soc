@@ -6,6 +6,7 @@ from app.corpus.loader import (
     load_corpus,
     load_eval_cases,
     parse_current_incident,
+    parse_finding,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "load_corpus",
     "load_eval_cases",
     "parse_current_incident",
+    "parse_finding",
 ]

@@ -125,6 +125,21 @@ class Document:
 
 
 @dataclass(frozen=True)
+class Finding:
+    """A measurement an engineer recorded to decide a conflicting fix.
+
+    Supplied by a person, never inferred. The system does not pick a side of a
+    conflict; a finding is how a human tells it which side the evidence is on.
+    """
+
+    target: str
+    component: str
+    favours_incident_id: str
+    observation: str
+    author: str | None = None
+
+
+@dataclass(frozen=True)
 class CurrentIncident:
     """The incident under investigation. Not part of the historical corpus."""
 
@@ -140,6 +155,8 @@ class CurrentIncident:
     log_excerpt: str | None = None
     started_at: datetime | None = None
     tech_context: tuple[str, ...] = field(default_factory=tuple)
+    notes: tuple[str, ...] = ()
+    findings: tuple[Finding, ...] = ()
 
     @property
     def anchor_time(self) -> datetime | None:

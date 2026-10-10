@@ -67,7 +67,17 @@ async def test_conflict_is_surfaced_and_charged_against_confidence(pack):
     assert targets == {"redis_connection_pool_size"}
     assert pack.mode is ResponseMode.INVESTIGATION
     assert pack.confidence < pack.top.score
-    assert any("conflicts" in unknown for unknown in pack.unknowns)
+    assert "unresolved conflicting remediation" in pack.gate_reason
+    assert not any("conflicts" in unknown for unknown in pack.unknowns)
+
+
+async def test_support_counts_shared_failure_shape_not_shared_service(pack):
+    """Other payment-api incidents with a different cause are neighbours, not support."""
+    assert pack.supporting_ids[0] == "INC-1042"
+    assert "INC-1210" not in pack.supporting_ids
+    assert "INC-1255" not in pack.supporting_ids
+    by_id = {c["incident_id"]: c for c in pack.to_dict()["candidates"]}
+    assert by_id["INC-1042"]["supports_hypothesis"] is True
 
 
 async def test_citation_ids_cover_incidents_postmortems_logs_and_runbooks(pack):
@@ -125,6 +135,67 @@ async def test_ranking_is_stable_across_runs(retriever, eval_cases):
         c.incident.incident_id for c in second.candidates
     ]
     assert first.confidence == second.confidence
+
+
+async def test_other_region_is_preferred_against_and_flagged_by_default(
+    retriever, eval_cases
+):
+    pack = await retriever.build_evidence(eval_cases["CUR-2051"].incident)
+    by_id = {c.incident.incident_id: c for c in pack.candidates}
+
+    assert pack.top.incident.incident_id == "INC-1042"
+    if "INC-1338" in by_id:
+        assert "other-region" in by_id["INC-1338"].flags
+        assert "different region (eu-west-1)" in by_id["INC-1338"].metadata_reasons
+    assert not any(e.filter == "region" for e in pack.excluded)
+
+
+async def test_region_policy_require_excludes_and_reports_other_regions(
+    repo, settings, provider, eval_cases
+):
+    from app.ingest import build_documents, index_documents
+    from app.retrieval import HybridRetriever
+    from app.vectors import InMemoryVectorStore
+
+    store = InMemoryVectorStore()
+    await index_documents(build_documents(repo), provider=provider, store=store)
+    strict = HybridRetriever(
+        repo, store, provider, settings.model_copy(update={"region_policy": "require"})
+    )
+
+    pack = await strict.build_evidence(eval_cases["CUR-2051"].incident)
+    excluded = {e.incident_id: e for e in pack.excluded}
+
+    assert "INC-1338" not in {c.incident.incident_id for c in pack.candidates}
+    assert excluded["INC-1338"].filter == "region"
+    assert "region policy: require" in excluded["INC-1338"].reason
+
+
+async def test_origin_filter_keeps_imported_knowledge_out(repo, settings, provider, eval_cases):
+    from dataclasses import replace
+
+    from app.ingest import build_documents, index_documents
+    from app.retrieval import HybridRetriever
+    from app.vectors import InMemoryVectorStore
+
+    imported = replace(
+        repo.incident("INC-1042"), incident_id="EXT-0001", origin="public:example.org"
+    )
+    repo.upsert_incident(imported)
+    store = InMemoryVectorStore()
+    await index_documents(build_documents(repo), provider=provider, store=store)
+
+    everything = HybridRetriever(repo, store, provider, settings)
+    synthetic_only = HybridRetriever(repo, store, provider, settings, origin="synthetic")
+    incident = eval_cases["CUR-2051"].incident
+
+    all_ids = {c.incident.incident_id for c in (await everything.build_evidence(incident)).candidates}
+    eval_ids = {
+        c.incident.incident_id for c in (await synthetic_only.build_evidence(incident)).candidates
+    }
+
+    assert "EXT-0001" in all_ids
+    assert "EXT-0001" not in eval_ids
 
 
 async def test_age_is_measured_against_the_incident_not_the_wall_clock(

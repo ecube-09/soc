@@ -18,6 +18,16 @@ class TimelineEventIn(BaseModel):
     description: str = ""
 
 
+class FindingIn(BaseModel):
+    """A measurement that settles a conflicting fix. Recorded by a person."""
+
+    target: str
+    component: str
+    favours_incident_id: str
+    observation: str = Field(min_length=1)
+    author: str | None = None
+
+
 class CurrentIncidentIn(BaseModel):
     title: str = Field(min_length=1)
     description: str = ""
@@ -31,6 +41,8 @@ class CurrentIncidentIn(BaseModel):
     tech_context: list[str] = Field(default_factory=list)
     events: list[TimelineEventIn] = Field(default_factory=list)
     log_excerpt: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    findings: list[FindingIn] = Field(default_factory=list)
 
 
 class InvestigationRequest(BaseModel):
@@ -38,6 +50,18 @@ class InvestigationRequest(BaseModel):
     case_id: str | None = Field(
         default=None,
         description="Attach to an existing case. A new one is created when omitted.",
+    )
+    author: str | None = Field(default=None, description="Who is investigating.")
+
+
+class RerunRequest(BaseModel):
+    author: str | None = None
+    incident: CurrentIncidentIn | None = Field(
+        default=None,
+        description=(
+            "An edited incident, for example with accepted timeline events. "
+            "Omit to re-run the incident already on the case."
+        ),
     )
 
 
@@ -99,6 +123,8 @@ class CandidateOut(BaseModel):
     postmortem_id: str | None
     log_ids: list[str]
     citation_ids: list[str]
+    supports_hypothesis: bool = False
+    support_reason: str | None = None
 
 
 class RunbookOut(BaseModel):
@@ -124,6 +150,15 @@ class ConflictSideOut(BaseModel):
     age_days: int
 
 
+class ResolutionOut(BaseModel):
+    target: str
+    component: str
+    favours_incident_id: str
+    rejected_incident_id: str
+    observation: str
+    author: str | None
+
+
 class ConflictOut(BaseModel):
     target: str
     component: str
@@ -131,12 +166,20 @@ class ConflictOut(BaseModel):
     distinguishing_question: str
     more_recent_incident_id: str
     sides: list[ConflictSideOut]
+    resolution: ResolutionOut | None = None
 
 
 class ExcludedOut(BaseModel):
     incident_id: str
     title: str
     reason: str
+    filter: Literal["environment", "region"] = "environment"
+
+
+class SupportOut(BaseModel):
+    incident_id: str
+    reason: str
+    stale: bool
 
 
 class CurrentIncidentOut(BaseModel):
@@ -152,6 +195,8 @@ class CurrentIncidentOut(BaseModel):
     tech_context: list[str]
     events: list[TimelineEventIn]
     log_excerpt: str | None
+    notes: list[str] = Field(default_factory=list)
+    findings: list[FindingIn] = Field(default_factory=list)
 
 
 class EvidenceOut(BaseModel):
@@ -164,6 +209,7 @@ class EvidenceOut(BaseModel):
     runbooks: list[RunbookOut]
     conflicts: list[ConflictOut]
     excluded: list[ExcludedOut]
+    support: list[SupportOut] = Field(default_factory=list)
     unknowns: list[str]
     notes: list[str]
     citation_ids: list[str]
@@ -173,6 +219,8 @@ class StepOut(BaseModel):
     action: str
     rationale: str
     citations: list[str]
+    would_falsify: str = ""
+    support: float | None = None
 
 
 class EscalationReportOut(BaseModel):
@@ -184,6 +232,7 @@ class EscalationReportOut(BaseModel):
     timeline: list[str]
     historical_correlation: list[str]
     evidence_gathered: list[str]
+    conflicting_guidance: list[str] = Field(default_factory=list)
     investigations_considered: list[StepOut]
     unresolved: list[str]
     requested_team: str
@@ -191,14 +240,35 @@ class EscalationReportOut(BaseModel):
     citations: list[str]
 
 
+class RevisionSummaryOut(BaseModel):
+    revision: int | None
+    mode: Literal["investigation", "escalation"]
+    confidence: float
+    root_cause_status: Literal["undetermined", "hypothesis"]
+    top_incident_id: str | None
+    created_at: str | None
+    author: str | None = None
+    reference_time: str | None = None
+
+
 class InvestigationResponse(BaseModel):
     case_id: str
+    revision: int
+    author: str | None
+    created_at: str = Field(description="Wall clock when this revision ran.")
+    reference_time: str | None = Field(
+        description="The incident's own time; recency is measured against this."
+    )
+    previous: RevisionSummaryOut | None
+    changes: list[str]
+    evidence_counts: dict[str, int]
     mode: Literal["investigation", "escalation"]
     root_cause_status: Literal["undetermined", "hypothesis"]
     confidence: float
     gate_reason: str
     headline: str
     root_cause_hypothesis: str | None
+    hypothesis_basis: list[str] = Field(default_factory=list)
     steps: list[StepOut]
     cautions: list[str]
     unresolved: list[str]
@@ -207,6 +277,7 @@ class InvestigationResponse(BaseModel):
     escalation_report: EscalationReportOut | None
     evidence: EvidenceOut
     rendered: str
+    rendered_markdown: str
 
 
 class ServiceOut(BaseModel):
@@ -236,6 +307,7 @@ class SourceOut(BaseModel):
 class ArtifactRequest(BaseModel):
     kind: str
     payload: dict = Field(default_factory=dict)
+    author: str | None = None
 
 
 class ArtifactOut(BaseModel):
@@ -243,6 +315,55 @@ class ArtifactOut(BaseModel):
     case_id: str
     kind: str
     created_at: str
+    author: str | None = None
+
+
+class ArtifactDetailOut(ArtifactOut):
+    payload: dict
+
+
+class CaseSummaryOut(BaseModel):
+    case_id: str
+    title: str
+    created_at: str
+    created_by: str | None
+    incident_started_at: str | None
+    latest: RevisionSummaryOut | None = None
+
+
+class CaseDetailOut(BaseModel):
+    case_id: str
+    title: str
+    created_at: str
+    created_by: str | None
+    incident_started_at: str | None
+    artifacts: list[ArtifactDetailOut]
+    revisions: list[RevisionSummaryOut]
+
+
+class TimelineExtractRequest(BaseModel):
+    log_text: str = Field(min_length=1)
+    service: str = Field(min_length=1, description="Default service for unattributed lines.")
+    date: str | None = Field(
+        default=None,
+        description="ISO date for lines that carry only a clock time.",
+    )
+
+
+class ProposedEventOut(BaseModel):
+    at: str
+    type: EventType
+    service: str
+    description: str
+    source_line: str
+    rule: str
+
+
+class TimelineExtractOut(BaseModel):
+    events: list[ProposedEventOut]
+    lines_read: int
+    lines_without_time: int
+    lines_unclassified: int
 
 
 class CorpusStatsOut(BaseModel):
@@ -250,3 +371,6 @@ class CorpusStatsOut(BaseModel):
     indexed_chunks: int
     supported_artifact_kinds: list[str]
     reserved_artifact_kinds: list[str]
+    origins: dict[str, int] = Field(default_factory=dict)
+    region_policy: Literal["prefer", "require"] = "prefer"
+    eval_origin: str = "synthetic"

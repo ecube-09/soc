@@ -7,6 +7,7 @@ import { TimelineCompare } from "./TimelineCompare";
 interface Props {
   candidates: Candidate[];
   excluded: ExcludedCase[];
+  regionPolicy: "prefer" | "require" | null;
   onCite: (sourceId: string) => void;
 }
 
@@ -19,14 +20,24 @@ const COMPONENT_LABELS: Record<string, string> = {
   service_graph: "service map",
 };
 
-export function ComparableCases({ candidates, excluded, onCite }: Props) {
+export function ComparableCases({ candidates, excluded, regionPolicy, onCite }: Props) {
   const [openId, setOpenId] = useState<string | null>(
     candidates[0]?.incident_id ?? null,
   );
 
   return (
     <Panel>
-      <Eyebrow>Comparable cases</Eyebrow>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <Eyebrow>Comparable cases</Eyebrow>
+        <span className="text-[11px] text-base-content/45">
+          Environment must match.{" "}
+          {regionPolicy === "require"
+            ? "Region must match."
+            : regionPolicy === "prefer"
+              ? "Other regions are kept and flagged."
+              : ""}
+        </span>
+      </div>
       {candidates.length === 0 ? (
         <p className="text-sm text-base-content/60">
           No historical case matched this service and environment.
@@ -56,11 +67,14 @@ export function ComparableCases({ candidates, excluded, onCite }: Props) {
                     </span>
                   </span>
                   <span className="hidden shrink-0 gap-1 sm:flex">
+                    {candidate.supports_hypothesis && (
+                      <span className="badge badge-xs badge-soft badge-info">supports</span>
+                    )}
                     {candidate.flags.map((flag) => (
                       <span
                         key={flag}
                         className={`badge badge-xs ${
-                          flag === "stale"
+                          flag === "stale" || flag === "other-region"
                             ? "badge-soft badge-warning"
                             : "badge-ghost"
                         }`}
@@ -96,6 +110,13 @@ export function ComparableCases({ candidates, excluded, onCite }: Props) {
                       </Fact>
                       <Fact label="Severity">{candidate.severity}</Fact>
                     </dl>
+
+                    {candidate.supports_hypothesis && candidate.support_reason && (
+                      <p className="text-sm leading-relaxed text-base-content/80">
+                        <span className="text-base-content/45">Counts as support: </span>
+                        {candidate.support_reason}
+                      </p>
+                    )}
 
                     <div>
                       <Eyebrow>Why it matched</Eyebrow>
@@ -178,16 +199,22 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 function ExcludedList({ excluded }: { excluded: ExcludedCase[] }) {
   if (excluded.length === 0) return null;
 
+  const byFilter = (["environment", "region"] as const)
+    .map((filter) => [filter, excluded.filter((e) => e.filter === filter).length] as const)
+    .filter(([, count]) => count > 0)
+    .map(([filter, count]) => `${count} by ${filter}`)
+    .join(", ");
+
   return (
     <details className="text-sm">
       <summary className="cursor-pointer text-xs text-base-content/45">
-        {excluded.length === 1
-          ? "1 case filtered out"
-          : `${excluded.length} cases filtered out`}
+        {excluded.length === 1 ? "1 case filtered out" : `${excluded.length} cases filtered out`}{" "}
+        ({byFilter})
       </summary>
       <ul className="mt-2 grid gap-1 text-sm text-base-content/65">
         {excluded.map((item) => (
           <li key={item.incident_id}>
+            <span className="badge badge-xs badge-ghost mr-2">{item.filter}</span>
             <span className="font-mono text-xs">{item.incident_id}</span>{" "}
             {item.title}
             <span className="text-base-content/40"> — {item.reason}</span>

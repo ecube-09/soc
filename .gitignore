@@ -1,24 +1,45 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 .venv/
 venv/
+env/
 .pytest_cache/
+.mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
 *.egg-info/
+*.egg
+build/
 
-# Env
+# Secrets. backend/.env.example stays tracked.
 .env
-.env.local
+.env.*
+!.env.example
 
-# Data (SQLite + Chroma live here)
-backend/data/
+# Generated local stores: SQLite, Chroma, and any stray database.
+backend/data/*
 !backend/data/.gitkeep
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
 
-# Node
+# Node / Vite
 node_modules/
 dist/
 .vite/
+*.tsbuildinfo
+*.local
 
-# Editors / OS
+# Editors and OS
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

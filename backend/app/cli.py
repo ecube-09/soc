@@ -8,11 +8,13 @@ import argparse
 import asyncio
 import json
 from collections.abc import Sequence
+from pathlib import Path
 
 from app.config import get_settings
 from app.corpus import load_corpus, load_eval_cases
 from app.db import SqliteRepository
 from app.ingest import build_documents, index_documents
+from app.ingest_markdown import MarkdownImportError, import_file, reimport_all
 from app.llm import build_provider
 from app.retrieval import HybridRetriever
 from app.vectors import ChromaVectorStore
@@ -46,6 +48,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="also run the model and check citation validity (slow)",
     )
+    evaluate.add_argument(
+        "--sensitivity",
+        action="store_true",
+        help="nudge each hand-tuned weight and threshold and report what flips",
+    )
+
+    importer = sub.add_parser(
+        "import-md",
+        help="import a Markdown postmortem into the corpus (labelled with its origin)",
+    )
+    importer.add_argument("paths", nargs="+")
+    importer.add_argument(
+        "--origin",
+        help="where the text came from, e.g. public:https://example.org/postmortem",
+    )
 
     args = parser.parse_args(argv)
     return _COMMANDS[args.command](args)
@@ -64,6 +81,7 @@ def _seed(_: argparse.Namespace) -> int:
             postmortems=corpus.postmortems,
             log_excerpts=corpus.log_excerpts,
         )
+        reimported = reimport_all(settings.imported_abs_path, repo)
         # Chunks are derived from the corpus; leaving the old ones would let the
         # index disagree with the knowledge it was built from.
         repo.replace_documents([])
@@ -72,8 +90,42 @@ def _seed(_: argparse.Namespace) -> int:
         repo.close()
 
     print(f"Seeded {settings.sqlite_abs_path}")
+    if reimported:
+        print(
+            f"Re-imported {len(reimported)} Markdown postmortem(s) from "
+            f"{settings.imported_abs_path} (origins kept; excluded from eval)"
+        )
     _print_counts(counts)
     return 0
+
+
+def _import_md(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    repo = SqliteRepository(settings.sqlite_abs_path)
+    failed = 0
+    try:
+        repo.init_schema()
+        for raw in args.paths:
+            path = Path(raw)
+            try:
+                imported = import_file(
+                    path, repo, origin=args.origin, keep_dir=settings.imported_abs_path
+                )
+            except (MarkdownImportError, OSError, ValueError) as exc:
+                print(f"  {path}: not imported - {exc}")
+                failed += 1
+                continue
+            incident = imported.incident
+            print(
+                f"  {incident.incident_id} from {path.name}: {len(incident.events)} events, "
+                f"{len(incident.actions)} actions, origin {incident.origin}"
+            )
+            for warning in imported.warnings:
+                print(f"    warning: {warning}")
+    finally:
+        repo.close()
+    print("Run `python -m app.cli ingest` to index the imported text.")
+    return 1 if failed else 0
 
 
 def _stats(_: argparse.Namespace) -> int:
@@ -192,7 +244,11 @@ def _eval(args: argparse.Namespace) -> int:
     from app.eval import run_eval
 
     return asyncio.run(
-        run_eval(as_json=args.json, with_generation=args.with_generation)
+        run_eval(
+            as_json=args.json,
+            with_generation=args.with_generation,
+            sensitivity=args.sensitivity,
+        )
     )
 
 
@@ -218,6 +274,7 @@ _COMMANDS = {
     "retrieve": _retrieve,
     "investigate": _investigate,
     "eval": _eval,
+    "import-md": _import_md,
 }
 
 if __name__ == "__main__":

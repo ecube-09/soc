@@ -17,6 +17,7 @@ from app.domain.enums import (
 from app.domain.models import (
     CurrentIncident,
     Document,
+    Finding,
     Incident,
     LogExcerpt,
     Postmortem,
@@ -37,6 +38,7 @@ __all__ = [
     "Environment",
     "EvalRole",
     "EventType",
+    "Finding",
     "Incident",
     "LogExcerpt",
     "Postmortem",

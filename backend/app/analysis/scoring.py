@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from app.analysis.temporal import align
 from app.domain import CurrentIncident, Incident, Runbook, Service
 
 _SEVERITY_RANK = {"SEV-1": 1, "SEV-2": 2, "SEV-3": 3, "SEV-4": 4}
@@ -109,6 +110,8 @@ def metadata_score(current: CurrentIncident, incident: Incident) -> MetadataMatc
     if current.region and incident.region == current.region:
         score += 0.05
         reasons.append(f"same region ({incident.region})")
+    elif region_differs(current, incident):
+        reasons.append(f"different region ({incident.region})")
 
     severity_gap = abs(
         _SEVERITY_RANK.get(current.severity.value, 3)
@@ -126,6 +129,19 @@ def metadata_score(current: CurrentIncident, incident: Incident) -> MetadataMatc
         reasons.append(f"symptom overlap {overlap:.0%}")
 
     return MetadataMatch(score=min(1.0, score), reasons=tuple(reasons))
+
+
+GLOBAL_REGION = "global"
+
+
+def region_differs(current: CurrentIncident, incident: Incident) -> bool:
+    """A known, different region. Global incidents and unknown regions never differ."""
+    return bool(
+        current.region
+        and incident.region
+        and incident.region != current.region
+        and GLOBAL_REGION not in (incident.region, current.region)
+    )
 
 
 def service_graph_score(
@@ -177,10 +193,62 @@ def incident_tokens(current: CurrentIncident) -> set[str]:
                 *current.symptoms,
                 *current.suspected_dependencies,
                 *current.tech_context,
+                *current.notes,
                 *(event.description for event in current.events),
                 current.log_excerpt or "",
             ]
         )
+    )
+
+
+def implicated_components(incident: Incident) -> frozenset[str]:
+    """What the failure ran through, beyond the service it was filed against."""
+    return frozenset(
+        {*incident.related_services, *(a.component for a in incident.actions)}
+        - {incident.service}
+    )
+
+
+@dataclass(frozen=True)
+class ShapeMatch:
+    shared: bool
+    components: tuple[str, ...]
+    timeline_similarity: float | None
+
+    def describe(self) -> str:
+        if not self.components:
+            return "no shared dependency"
+        parts = [f"fails through {', '.join(self.components)}"]
+        if self.timeline_similarity is not None:
+            parts.append(f"timeline shape {self.timeline_similarity:.2f}")
+        return "; ".join(parts)
+
+
+def failure_shape(left: Incident, right: Incident, *, min_similarity: float) -> ShapeMatch:
+    """Do two incidents share a failure shape, not merely a service?
+
+    Two payment-api incidents, one through Redis and one through Postgres, are
+    different failures that happen to be filed in the same place. So the overlap
+    has to involve an implicated dependency on at least one side, and when both
+    have timelines, the order of events has to agree as well.
+    """
+    left_implicated = implicated_components(left)
+    right_implicated = implicated_components(right)
+    if left_implicated or right_implicated:
+        shared = (left_implicated & ({right.service} | right_implicated)) | (
+            right_implicated & ({left.service} | left_implicated)
+        )
+    else:
+        shared = {left.service} & {right.service}
+
+    similarity: float | None = None
+    if left.events and right.events:
+        similarity = align(left.events, right.events).sequence_score
+
+    return ShapeMatch(
+        shared=bool(shared) and (similarity is None or similarity >= min_similarity),
+        components=tuple(sorted(shared)),
+        timeline_similarity=similarity,
     )
 
 

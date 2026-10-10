@@ -42,6 +42,16 @@ export interface CurrentIncident {
   tech_context: string[];
   events: TimelineEventInput[];
   log_excerpt: string | null;
+  notes?: string[];
+  findings?: Finding[];
+}
+
+export interface Finding {
+  target: string;
+  component: string;
+  favours_incident_id: string;
+  observation: string;
+  author?: string | null;
 }
 
 export interface NormalizedEvent {
@@ -102,6 +112,8 @@ export interface Candidate {
   postmortem_id: string | null;
   log_ids: string[];
   citation_ids: string[];
+  supports_hypothesis: boolean;
+  support_reason: string | null;
 }
 
 export interface RunbookMatch {
@@ -134,12 +146,29 @@ export interface Conflict {
   distinguishing_question: string;
   more_recent_incident_id: string;
   sides: ConflictSide[];
+  resolution: ConflictResolution | null;
+}
+
+export interface ConflictResolution {
+  target: string;
+  component: string;
+  favours_incident_id: string;
+  rejected_incident_id: string;
+  observation: string;
+  author: string | null;
+}
+
+export interface Support {
+  incident_id: string;
+  reason: string;
+  stale: boolean;
 }
 
 export interface ExcludedCase {
   incident_id: string;
   title: string;
   reason: string;
+  filter: "environment" | "region";
 }
 
 export interface Evidence {
@@ -152,6 +181,7 @@ export interface Evidence {
   runbooks: RunbookMatch[];
   conflicts: Conflict[];
   excluded: ExcludedCase[];
+  support: Support[];
   unknowns: string[];
   notes: string[];
   citation_ids: string[];
@@ -161,6 +191,8 @@ export interface Step {
   action: string;
   rationale: string;
   citations: string[];
+  would_falsify: string;
+  support: number | null;
 }
 
 export interface EscalationReport {
@@ -172,6 +204,7 @@ export interface EscalationReport {
   timeline: string[];
   historical_correlation: string[];
   evidence_gathered: string[];
+  conflicting_guidance: string[];
   investigations_considered: Step[];
   unresolved: string[];
   requested_team: string;
@@ -179,14 +212,35 @@ export interface EscalationReport {
   citations: string[];
 }
 
+export interface RevisionSummary {
+  revision: number | null;
+  mode: ResponseMode;
+  confidence: number;
+  root_cause_status: RootCauseStatus;
+  top_incident_id: string | null;
+  created_at: string | null;
+  author: string | null;
+  reference_time: string | null;
+}
+
 export interface InvestigationResponse {
   case_id: string;
+  revision: number;
+  author: string | null;
+  /** Wall clock when this revision ran. */
+  created_at: string;
+  /** The incident's own time; recency is measured against it. */
+  reference_time: string | null;
+  previous: RevisionSummary | null;
+  changes: string[];
+  evidence_counts: Record<string, number>;
   mode: ResponseMode;
   root_cause_status: RootCauseStatus;
   confidence: number;
   gate_reason: string;
   headline: string;
   root_cause_hypothesis: string | null;
+  hypothesis_basis: string[];
   steps: Step[];
   cautions: string[];
   unresolved: string[];
@@ -195,6 +249,48 @@ export interface InvestigationResponse {
   escalation_report: EscalationReport | null;
   evidence: Evidence;
   rendered: string;
+  rendered_markdown: string;
+}
+
+export type EvidenceKind = "note" | "log_excerpt" | "finding";
+
+export interface Artifact {
+  artifact_id: string;
+  case_id: string;
+  kind: string;
+  created_at: string;
+  author: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface CaseSummary {
+  case_id: string;
+  title: string;
+  created_at: string;
+  created_by: string | null;
+  incident_started_at: string | null;
+  latest: RevisionSummary | null;
+}
+
+export interface CaseDetail extends Omit<CaseSummary, "latest"> {
+  artifacts: Artifact[];
+  revisions: RevisionSummary[];
+}
+
+export interface ProposedEvent {
+  at: string;
+  type: EventType;
+  service: string;
+  description: string;
+  source_line: string;
+  rule: string;
+}
+
+export interface TimelineExtraction {
+  events: ProposedEvent[];
+  lines_read: number;
+  lines_without_time: number;
+  lines_unclassified: number;
 }
 
 export interface Service {
@@ -224,4 +320,7 @@ export interface CorpusStats {
   indexed_chunks: number;
   supported_artifact_kinds: string[];
   reserved_artifact_kinds: string[];
+  origins: Record<string, number>;
+  region_policy: "prefer" | "require";
+  eval_origin: string;
 }

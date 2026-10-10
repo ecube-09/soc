@@ -107,11 +107,15 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_type, source_id);
 
 -- A case is the unit of work. The current incident is its first artifact;
--- later uploads (logs, captures, files) attach to the same case.
+-- later uploads (logs, notes, findings) attach to the same case.
+-- created_at is the wall clock when someone opened the case. incident_started_at
+-- is the incident's own time, which is what recency is measured against.
 CREATE TABLE IF NOT EXISTS cases (
-    case_id    TEXT PRIMARY KEY,
-    title      TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    case_id             TEXT PRIMARY KEY,
+    title               TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    created_by          TEXT,
+    incident_started_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -119,7 +123,28 @@ CREATE TABLE IF NOT EXISTS artifacts (
     case_id     TEXT NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
     kind        TEXT NOT NULL,
     payload     TEXT NOT NULL,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    author      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_case ON artifacts(case_id, created_at);
+
+-- Every run of the pipeline on a case, kept whole: the evidence pack, the
+-- hypothesis or escalation report, and the validation notes. A re-run after new
+-- evidence is a new revision, so the case shows how the answer moved.
+CREATE TABLE IF NOT EXISTS investigations (
+    investigation_id  TEXT PRIMARY KEY,
+    case_id           TEXT NOT NULL REFERENCES cases(case_id) ON DELETE CASCADE,
+    revision          INTEGER NOT NULL,
+    created_at        TEXT NOT NULL,
+    reference_time    TEXT,
+    author            TEXT,
+    mode              TEXT NOT NULL,
+    confidence        REAL NOT NULL,
+    root_cause_status TEXT NOT NULL,
+    top_incident_id   TEXT,
+    result            TEXT NOT NULL,
+    UNIQUE (case_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigations_case ON investigations(case_id, revision);

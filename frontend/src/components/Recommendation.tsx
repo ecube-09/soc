@@ -40,6 +40,16 @@ export function Recommendation({ result, onCite }: Props) {
         </div>
       </div>
 
+      {result.mode !== result.evidence.mode && (
+        <div role="status" className="alert alert-warning alert-soft text-sm text-base-content">
+          <span>
+            The evidence was strong enough for an investigation, but none of the
+            drafted steps survived the checks, so this is an escalation. The
+            validation notes below say what was removed and why.
+          </span>
+        </div>
+      )}
+
       {escalation ? (
         <EscalationBody report={escalation} onCite={onCite} />
       ) : (
@@ -67,7 +77,9 @@ export function Recommendation({ result, onCite }: Props) {
       <p className="border-t border-base-300 pt-3 text-xs text-base-content/45">
         {escalation
           ? "No remediation has been applied. This report states what is known and what is not."
-          : "Nothing here has been applied. An engineer decides and acts."}
+          : "Nothing here has been applied. An engineer decides and acts."}{" "}
+        Wording is drafted by a local model and checked against the cited
+        documents; the mode and confidence come from retrieval, not the model.
       </p>
     </Panel>
   );
@@ -85,6 +97,14 @@ function InvestigationBody({ result, onCite }: Props) {
           <p className="mt-1 max-w-prose text-sm leading-relaxed">
             {result.root_cause_hypothesis}
           </p>
+          {result.hypothesis_basis.length > 0 && (
+            <p className="mt-1.5 flex flex-wrap items-center gap-1 text-xs text-base-content/45">
+              Rests on
+              {result.hypothesis_basis.map((id) => (
+                <Cite key={id} id={id} onCite={onCite} />
+              ))}
+            </p>
+          )}
         </div>
       )}
 
@@ -198,10 +218,24 @@ function StepItem({
             {step.rationale}
           </p>
         )}
-        <div className="mt-1.5 flex flex-wrap gap-1">
+        {step.would_falsify && (
+          <p className="mt-1 text-sm leading-relaxed text-base-content/55">
+            <span className="text-base-content/40">Would rule it out: </span>
+            {step.would_falsify}
+          </p>
+        )}
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
           {step.citations.map((id) => (
             <Cite key={id} id={id} onCite={onCite} />
           ))}
+          {step.support !== null && (
+            <span
+              className="tooltip text-[11px] text-base-content/40"
+              data-tip="Share of the step's content words found in the cited documents"
+            >
+              {Math.round(step.support * 100)}% in sources
+            </span>
+          )}
         </div>
       </div>
     </li>

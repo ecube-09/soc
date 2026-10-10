@@ -64,6 +64,8 @@ class ArtifactKind(StrEnum):
 
     INCIDENT = "incident"
     LOG_EXCERPT = "log_excerpt"
+    NOTE = "note"
+    FINDING = "finding"
     POSTMORTEM = "postmortem"
     RUNBOOK = "runbook"
     SERVICE_MAP = "service_map"
@@ -77,6 +79,8 @@ SUPPORTED_ARTIFACT_KINDS: frozenset[ArtifactKind] = frozenset(
     {
         ArtifactKind.INCIDENT,
         ArtifactKind.LOG_EXCERPT,
+        ArtifactKind.NOTE,
+        ArtifactKind.FINDING,
         ArtifactKind.POSTMORTEM,
         ArtifactKind.RUNBOOK,
         ArtifactKind.SERVICE_MAP,
