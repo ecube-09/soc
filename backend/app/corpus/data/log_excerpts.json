@@ -1,0 +1,78 @@
+[
+  {
+    "log_id": "LOG-1042",
+    "incident_id": "INC-1042",
+    "service": "payment-api",
+    "captured_at": "2026-08-14T10:41:00",
+    "lines": [
+      "10:39:58 WARN  redis.pool  checkout wait 1980ms pool=50/50 waiters=61 replica=payment-api-7c9",
+      "10:40:02 ERROR redis.pool  TimeoutError: timeout waiting for connection from pool after 2000ms",
+      "10:40:02 ERROR http       POST /v1/authorisations -> 503 (upstream_unavailable) trace=8f1c2a",
+      "10:40:11 INFO  redis.stats server_ok=true latency_ms=1.2 connected_clients=402 maxclients=1500",
+      "10:41:00 WARN  redis.pool  pool=50/50 on all 8 replicas; no idle connections observed for 84s"
+    ]
+  },
+  {
+    "log_id": "LOG-1198",
+    "incident_id": "INC-1198",
+    "service": "payment-api",
+    "captured_at": "2026-09-02T09:17:00",
+    "lines": [
+      "09:16:41 ERROR redis.client ReplyError: ERR max number of clients reached",
+      "09:16:41 ERROR http        POST /v1/authorisations -> 503 (upstream_unavailable) trace=b22e10",
+      "09:16:44 INFO  redis.stats connected_clients=1500 maxclients=1500 rejected_connections=2841",
+      "09:16:50 WARN  autoscaler  payment-api replicas=14 (was 8 at 08:40)",
+      "09:17:03 ERROR redis.client checkout-api and notification-worker reporting the same reply"
+    ]
+  },
+  {
+    "log_id": "LOG-0412",
+    "incident_id": "INC-0412",
+    "service": "payment-api",
+    "captured_at": "2022-03-11T22:09:00",
+    "lines": [
+      "22:08:12 ERROR redis  ERR max number of clients reached",
+      "22:08:12 ERROR http   POST /v1/charge -> 503 trace=41ba9c",
+      "22:08:30 INFO  redis  connected_clients=4000 maxclients=4000 (redis_version:5.0.14)",
+      "22:08:44 WARN  redis  connection opened per worker thread; 128 threads x 32 pods"
+    ]
+  },
+  {
+    "log_id": "LOG-1301",
+    "incident_id": "INC-1301",
+    "service": "checkout-api",
+    "captured_at": "2026-09-11T19:47:00",
+    "lines": [
+      "19:46:10 INFO  redis.stats used_memory=3.98G maxmemory=4.00G evicted_keys=118402 policy=allkeys-lru",
+      "19:46:22 WARN  cart.cache  miss ratio 62% over the last minute (baseline 6%)",
+      "19:46:35 INFO  postgres    cart rebuild queries 2.1k/s (baseline 0.9k/s)",
+      "19:47:01 WARN  http        GET /v1/cart p99=684ms (baseline 210ms)"
+    ]
+  },
+  {
+    "log_id": "LOG-1275",
+    "incident_id": "INC-1275",
+    "service": "redis-cache",
+    "captured_at": "2026-09-08T16:33:00",
+    "lines": [
+      "16:30:04 ERROR cluster  node shard-1-a unreachable; failover initiated",
+      "16:30:44 INFO  cluster  shard-1-b promoted to primary",
+      "16:31:02 ERROR client   payment-api: MOVED 5431 shard-1-a:6379 (stale topology, refresh in 248s)",
+      "16:31:09 ERROR client   checkout-api and auth-api reporting connection refused to shard-1-a",
+      "16:33:00 WARN  cluster  3 clients still dialling the terminated node"
+    ]
+  },
+  {
+    "log_id": "LOG-0778",
+    "incident_id": "INC-0778",
+    "service": "auth-api",
+    "captured_at": "2026-06-18T13:08:00",
+    "lines": [
+      "13:05:12 ERROR db      connection to pg-node-1:5432 failed: no route to host",
+      "13:06:01 ERROR http    POST /v1/sessions -> 500 (database_unavailable) trace=0cc41e",
+      "13:06:30 WARN  patroni cluster state: leader=pg-node-1 (lock held, ttl 60s, last seen 78s ago)",
+      "13:07:00 ERROR patroni no promotion attempted; leader lock still considered valid",
+      "13:08:00 INFO  patroni replica pg-node-2 lag=0 bytes, eligible for promotion"
+    ]
+  }
+]

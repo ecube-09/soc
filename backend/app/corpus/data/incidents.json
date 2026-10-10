@@ -1,0 +1,574 @@
+[
+  {
+    "incident_id": "INC-1042",
+    "title": "Payment API elevated 503 errors after v2.8.1",
+    "summary": "payment-api returned HTTP 503 for 38% of authorisation requests six minutes after a routine deploy. Redis connection waits timed out because the client pool saturated.",
+    "severity": "SEV-2",
+    "service": "payment-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-08-14T10:37:00",
+    "resolved_at": "2026-08-14T11:20:00",
+    "root_cause": "payment-api v2.8.1 added an idempotency lookup that issued two extra Redis calls per request without raising the client pool. The 50-connection pool saturated, requests blocked on connection checkout, and the service shed them as 503.",
+    "resolution": "Rolled back to v2.8.0 to stop the bleeding, then re-released v2.8.2 with the Redis client pool raised from 50 to 100 connections per replica.",
+    "symptoms": [
+      "HTTP 503 rate rose from 0.4% to 38%",
+      "p99 authorisation latency 4.2x baseline",
+      "redis client 'timeout waiting for connection from pool' errors",
+      "Redis server CPU and memory flat"
+    ],
+    "related_services": ["redis-cache"],
+    "tech_context": ["Redis 7.2", "Kubernetes 1.31", "Node.js 22", "payment-api v2.8.1"],
+    "events": [
+      {"at": "2026-08-14T10:31:00", "type": "deploy", "service": "payment-api", "description": "Deployed payment-api v2.8.1 to production (8 replicas, rolling)."},
+      {"at": "2026-08-14T10:37:00", "type": "error_spike", "service": "payment-api", "description": "HTTP 503 rate crossed 5% and continued climbing to 38%."},
+      {"at": "2026-08-14T10:39:00", "type": "latency_spike", "service": "payment-api", "description": "p99 latency rose from 180ms to 760ms."},
+      {"at": "2026-08-14T10:41:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Client-side pool checkout timeouts; pool reported 50/50 in use on every replica."},
+      {"at": "2026-08-14T10:44:00", "type": "alert", "service": "payment-api", "description": "Alert PAY-5XX fired to the payments on-call."},
+      {"at": "2026-08-14T10:51:00", "type": "mitigation", "service": "payment-api", "description": "Rollback to v2.8.0 started."},
+      {"at": "2026-08-14T11:02:00", "type": "mitigation", "service": "payment-api", "description": "Error rate returned to baseline as rollback completed."}
+    ],
+    "actions": [
+      {"component": "payment-api", "target": "deployment_version", "direction": "rollback", "from_value": "v2.8.1", "to_value": "v2.8.0", "note": "Immediate mitigation."},
+      {"component": "payment-api", "target": "redis_connection_pool_size", "direction": "increase", "from_value": "50", "to_value": "100", "note": "Sized for the extra calls per request. Replica count was not considered."}
+    ]
+  },
+  {
+    "incident_id": "INC-1198",
+    "title": "Redis cluster refused connections after payment-api pool increase",
+    "summary": "redis-cache reached maxclients and rejected new connections across several services. The 100-connection pool from INC-1042 was multiplied by 14 payment-api replicas.",
+    "severity": "SEV-2",
+    "service": "payment-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-09-02T09:14:00",
+    "resolved_at": "2026-09-02T10:05:00",
+    "root_cause": "The larger client pool from INC-1042 was correct per replica but not in aggregate. After autoscaling to 14 replicas, payment-api alone held 1,400 of the 1,500 configured Redis maxclients, so redis-cache refused connections to payment-api, checkout-api, and notification-worker.",
+    "resolution": "Reduced the payment-api Redis client pool from 100 to 30 connections per replica and left maxclients unchanged. Aggregate pool sizing was added to the deploy checklist.",
+    "symptoms": [
+      "redis-cache 'ERR max number of clients reached'",
+      "connection errors on checkout-api and notification-worker as well",
+      "Redis connected_clients pinned at 1500",
+      "payment-api 503 rate 12%"
+    ],
+    "related_services": ["redis-cache", "checkout-api", "notification-worker"],
+    "tech_context": ["Redis 7.2", "Kubernetes 1.31", "Node.js 22", "payment-api v2.8.2"],
+    "events": [
+      {"at": "2026-09-02T09:14:00", "type": "latency_spike", "service": "payment-api", "description": "p99 latency doubled without any deploy in the preceding four hours."},
+      {"at": "2026-09-02T09:16:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Redis returned 'max number of clients reached' to new connections."},
+      {"at": "2026-09-02T09:21:00", "type": "error_spike", "service": "payment-api", "description": "503 rate reached 12%; checkout-api began failing as well."},
+      {"at": "2026-09-02T09:23:00", "type": "alert", "service": "redis-cache", "description": "Alert REDIS-MAXCLIENTS fired to the platform on-call."},
+      {"at": "2026-09-02T09:40:00", "type": "mitigation", "service": "payment-api", "description": "Rolled the Redis client pool down to 30 per replica."},
+      {"at": "2026-09-02T10:05:00", "type": "mitigation", "service": "redis-cache", "description": "connected_clients settled at 640; errors cleared."}
+    ],
+    "actions": [
+      {"component": "payment-api", "target": "redis_connection_pool_size", "direction": "decrease", "from_value": "100", "to_value": "30", "note": "Dependency-side saturation, not app-side exhaustion. Directly reverses INC-1042."}
+    ]
+  },
+  {
+    "incident_id": "INC-0412",
+    "title": "Payment API 503 errors and Redis timeouts after v1.4.2",
+    "summary": "payment-api returned 503 and logged Redis timeouts minutes after a deploy. Redis was refusing connections at its configured maxclients ceiling.",
+    "severity": "SEV-2",
+    "service": "payment-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2022-03-11T22:04:00",
+    "resolved_at": "2022-03-11T23:01:00",
+    "root_cause": "payment-api v1.4.2 opened a Redis connection per worker thread instead of sharing a pool. The single Redis node hit its maxclients ceiling of 4000 and refused further connections.",
+    "resolution": "Raised maxclients in redis.conf from 4000 to 10000 and restarted the Redis node during a maintenance window. The per-thread connection behaviour was fixed in a later release.",
+    "symptoms": [
+      "HTTP 503 rate 41%",
+      "redis 'max number of clients reached'",
+      "p99 latency 5x baseline"
+    ],
+    "related_services": ["redis-cache"],
+    "tech_context": ["Redis 5.0", "Kubernetes 1.22", "Node.js 14", "single Redis node, no cluster mode", "payment-api v1.4.2"],
+    "events": [
+      {"at": "2022-03-11T21:58:00", "type": "deploy", "service": "payment-api", "description": "Deployed payment-api v1.4.2."},
+      {"at": "2022-03-11T22:04:00", "type": "error_spike", "service": "payment-api", "description": "503 rate crossed 5% and climbed to 41%."},
+      {"at": "2022-03-11T22:06:00", "type": "latency_spike", "service": "payment-api", "description": "p99 latency 5x baseline."},
+      {"at": "2022-03-11T22:08:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Redis refused new connections at maxclients."},
+      {"at": "2022-03-11T22:12:00", "type": "alert", "service": "payment-api", "description": "Nagios alert on payment 5xx."},
+      {"at": "2022-03-11T22:40:00", "type": "mitigation", "service": "redis-cache", "description": "maxclients raised and Redis restarted."}
+    ],
+    "actions": [
+      {"component": "redis-cache", "target": "redis_maxclients", "direction": "increase", "from_value": "4000", "to_value": "10000", "note": "Single-node Redis 5 configuration; the cluster no longer runs this way."},
+      {"component": "redis-cache", "target": "redis_process", "direction": "restart", "from_value": null, "to_value": null, "note": "Required a maintenance window on the single node."}
+    ]
+  },
+  {
+    "incident_id": "INC-0995",
+    "title": "Staging payment-api 503 errors after v2.9.0-rc1",
+    "summary": "Release candidate in staging produced 503 errors and Redis pool timeouts. Contained to staging; no customer impact.",
+    "severity": "SEV-4",
+    "service": "payment-api",
+    "environment": "staging",
+    "region": "ap-south-1",
+    "started_at": "2026-08-29T15:02:00",
+    "resolved_at": "2026-08-29T15:35:00",
+    "root_cause": "v2.9.0-rc1 shipped with the Redis pool size left at the staging default of 10, which is too small for the load-test profile.",
+    "resolution": "Set the staging Redis pool to match the production value and re-ran the load test.",
+    "symptoms": [
+      "HTTP 503 rate 33% in staging",
+      "redis pool checkout timeouts",
+      "load-test harness aborted"
+    ],
+    "related_services": ["redis-cache"],
+    "tech_context": ["Redis 7.2", "Kubernetes 1.31", "payment-api v2.9.0-rc1", "staging cluster, 2 replicas"],
+    "events": [
+      {"at": "2026-08-29T14:56:00", "type": "deploy", "service": "payment-api", "description": "Deployed payment-api v2.9.0-rc1 to staging."},
+      {"at": "2026-08-29T15:02:00", "type": "error_spike", "service": "payment-api", "description": "503 rate 33% under the load-test profile."},
+      {"at": "2026-08-29T15:04:00", "type": "latency_spike", "service": "payment-api", "description": "p99 latency 6x the staging baseline."},
+      {"at": "2026-08-29T15:06:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Pool checkout timeouts against the staging Redis instance."},
+      {"at": "2026-08-29T15:09:00", "type": "alert", "service": "payment-api", "description": "Staging alert routed to the release channel, not to on-call."},
+      {"at": "2026-08-29T15:35:00", "type": "mitigation", "service": "payment-api", "description": "Staging pool size corrected."}
+    ],
+    "actions": [
+      {"component": "payment-api", "target": "redis_connection_pool_size", "direction": "increase", "from_value": "10", "to_value": "50", "note": "Staging-only configuration drift."}
+    ]
+  },
+  {
+    "incident_id": "INC-0871",
+    "title": "Ledger service exhausted Postgres connections during settlement",
+    "summary": "ledger-service settlement batch opened more connections than pgbouncer allowed, stalling ledger writes and slowing payment-api captures.",
+    "severity": "SEV-3",
+    "service": "ledger-service",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-07-22T03:10:00",
+    "resolved_at": "2026-07-22T04:02:00",
+    "root_cause": "The nightly settlement batch runs one connection per shard. A shard split raised the shard count from 32 to 64 while the pgbouncer pool stayed at 40, so half the workers blocked waiting for a server connection.",
+    "resolution": "Raised the pgbouncer pool from 40 to 80 and capped batch concurrency at the pool size.",
+    "symptoms": [
+      "pgbouncer 'no more connections allowed'",
+      "settlement batch duration 3.5x normal",
+      "payment-api capture latency raised"
+    ],
+    "related_services": ["postgres-primary", "payment-api"],
+    "tech_context": ["Postgres 16", "pgbouncer 1.22", "Kubernetes 1.31"],
+    "events": [
+      {"at": "2026-07-22T03:10:00", "type": "latency_spike", "service": "ledger-service", "description": "Settlement batch step latency rose sharply."},
+      {"at": "2026-07-22T03:14:00", "type": "dependency_timeout", "service": "postgres-primary", "description": "pgbouncer rejected new client connections."},
+      {"at": "2026-07-22T03:22:00", "type": "alert", "service": "ledger-service", "description": "Alert LEDGER-BATCH-SLA fired."},
+      {"at": "2026-07-22T03:48:00", "type": "mitigation", "service": "postgres-primary", "description": "pgbouncer pool raised to 80."}
+    ],
+    "actions": [
+      {"component": "postgres-primary", "target": "pgbouncer_pool_size", "direction": "increase", "from_value": "40", "to_value": "80", "note": "Batch concurrency capped at the same number."}
+    ]
+  },
+  {
+    "incident_id": "INC-1301",
+    "title": "Checkout latency from Redis key eviction",
+    "summary": "checkout-api latency tripled because redis-cache was evicting live cart sessions under memory pressure.",
+    "severity": "SEV-3",
+    "service": "checkout-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-09-11T19:40:00",
+    "resolved_at": "2026-09-11T20:25:00",
+    "root_cause": "redis-cache reached its 4GB maxmemory limit. With allkeys-lru, Redis evicted active cart sessions alongside cache entries, so checkout-api rebuilt carts from Postgres on most requests.",
+    "resolution": "Raised maxmemory from 4GB to 8GB and moved cart sessions to a logical database with volatile-lru so only keys with a TTL can be evicted.",
+    "symptoms": [
+      "checkout-api p99 latency 3.1x baseline",
+      "Redis evicted_keys rising steadily",
+      "cart cache hit rate fell from 94% to 38%",
+      "Postgres read QPS doubled"
+    ],
+    "related_services": ["redis-cache", "postgres-primary"],
+    "tech_context": ["Redis 7.2", "maxmemory-policy allkeys-lru", "Kubernetes 1.31"],
+    "events": [
+      {"at": "2026-09-11T19:40:00", "type": "latency_spike", "service": "checkout-api", "description": "p99 latency rose from 210ms to 650ms."},
+      {"at": "2026-09-11T19:46:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Cache misses and slow GETs as evictions accelerated."},
+      {"at": "2026-09-11T19:52:00", "type": "alert", "service": "checkout-api", "description": "Alert CHECKOUT-LATENCY fired."},
+      {"at": "2026-09-11T20:10:00", "type": "mitigation", "service": "redis-cache", "description": "maxmemory raised to 8GB."}
+    ],
+    "actions": [
+      {"component": "redis-cache", "target": "redis_maxmemory", "direction": "increase", "from_value": "4gb", "to_value": "8gb", "note": null},
+      {"component": "redis-cache", "target": "maxmemory_policy", "direction": "reconfigure", "from_value": "allkeys-lru", "to_value": "volatile-lru", "note": "Applied to the session database only."}
+    ]
+  },
+  {
+    "incident_id": "INC-1120",
+    "title": "Notification queue backlog during campaign send",
+    "summary": "notification-worker fell behind the Redis queue during a marketing campaign; delivery lag reached 40 minutes.",
+    "severity": "SEV-3",
+    "service": "notification-worker",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-08-03T06:20:00",
+    "resolved_at": "2026-08-03T07:30:00",
+    "root_cause": "Four worker replicas could not drain a campaign enqueueing 9,000 messages per minute. Queue depth grew monotonically and the workers began timing out on Redis blocking pops.",
+    "resolution": "Scaled notification-worker from 4 to 10 replicas and added a queue-depth based autoscaler.",
+    "symptoms": [
+      "queue depth 210,000 and rising",
+      "delivery lag 40 minutes",
+      "worker Redis BRPOP timeouts"
+    ],
+    "related_services": ["redis-cache"],
+    "tech_context": ["Redis 7.2", "Kubernetes 1.31", "4 worker replicas"],
+    "events": [
+      {"at": "2026-08-03T06:20:00", "type": "latency_spike", "service": "notification-worker", "description": "Delivery lag crossed five minutes."},
+      {"at": "2026-08-03T06:34:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Worker BRPOP calls timed out under queue pressure."},
+      {"at": "2026-08-03T06:40:00", "type": "alert", "service": "notification-worker", "description": "Alert NOTIFY-LAG fired."},
+      {"at": "2026-08-03T06:58:00", "type": "mitigation", "service": "notification-worker", "description": "Replica count raised to 10."}
+    ],
+    "actions": [
+      {"component": "notification-worker", "target": "worker_replica_count", "direction": "scale_out", "from_value": "4", "to_value": "10", "note": "Sized for the campaign send rate."}
+    ]
+  },
+  {
+    "incident_id": "INC-1320",
+    "title": "Notification workers saturated Postgres after scale-out",
+    "summary": "The ten notification-worker replicas from INC-1120 exhausted Postgres connections during a nightly batch, blocking ledger writes.",
+    "severity": "SEV-3",
+    "service": "notification-worker",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-09-22T01:05:00",
+    "resolved_at": "2026-09-22T01:58:00",
+    "root_cause": "Ten replicas each hold a 20-connection Postgres pool. Overlapping with the settlement batch, that left no headroom in pgbouncer and ledger-service writes blocked. The scale-out from INC-1120 was sized for Redis throughput, not for Postgres connections.",
+    "resolution": "Reduced notification-worker from 10 to 5 replicas and moved the campaign send outside the settlement window.",
+    "symptoms": [
+      "pgbouncer pool fully utilised",
+      "ledger-service write timeouts",
+      "notification delivery lag 12 minutes"
+    ],
+    "related_services": ["postgres-primary", "ledger-service", "redis-cache"],
+    "tech_context": ["Postgres 16", "pgbouncer 1.22", "Kubernetes 1.31", "10 worker replicas"],
+    "events": [
+      {"at": "2026-09-22T01:05:00", "type": "latency_spike", "service": "notification-worker", "description": "Worker job duration rose as connection checkout blocked."},
+      {"at": "2026-09-22T01:11:00", "type": "dependency_timeout", "service": "postgres-primary", "description": "pgbouncer had no free server connections."},
+      {"at": "2026-09-22T01:18:00", "type": "error_spike", "service": "ledger-service", "description": "Ledger write errors from connection timeouts."},
+      {"at": "2026-09-22T01:22:00", "type": "alert", "service": "postgres-primary", "description": "Alert PG-POOL-SATURATION fired."},
+      {"at": "2026-09-22T01:44:00", "type": "mitigation", "service": "notification-worker", "description": "Replica count reduced to 5."}
+    ],
+    "actions": [
+      {"component": "notification-worker", "target": "worker_replica_count", "direction": "scale_in", "from_value": "10", "to_value": "5", "note": "Dependency-side connection limit, not worker throughput. Reverses INC-1120."}
+    ]
+  },
+  {
+    "incident_id": "INC-0778",
+    "title": "Auth API total outage during Postgres failover",
+    "summary": "Postgres primary failed and Patroni did not promote the replica, leaving auth-api unable to issue sessions for 26 minutes.",
+    "severity": "SEV-1",
+    "service": "auth-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-06-18T13:05:00",
+    "resolved_at": "2026-06-18T13:52:00",
+    "root_cause": "The primary Postgres node lost its storage volume. Patroni held a stale leader lock because its TTL was longer than the detection window, so automatic promotion did not run and every login failed.",
+    "resolution": "Promoted the replica manually, then lowered the Patroni leader TTL and loop interval so detection completes inside the alerting window.",
+    "symptoms": [
+      "auth-api 5xx rate 100%",
+      "logins failing across all surfaces",
+      "Postgres primary unreachable",
+      "no automatic promotion"
+    ],
+    "related_services": ["postgres-primary"],
+    "tech_context": ["Postgres 16", "Patroni 3.2", "Kubernetes 1.31"],
+    "events": [
+      {"at": "2026-06-18T13:05:00", "type": "dependency_timeout", "service": "postgres-primary", "description": "Primary node stopped responding to health checks."},
+      {"at": "2026-06-18T13:06:00", "type": "error_spike", "service": "auth-api", "description": "5xx rate reached 100%."},
+      {"at": "2026-06-18T13:07:00", "type": "alert", "service": "auth-api", "description": "Alert AUTH-DOWN paged identity and database on-call."},
+      {"at": "2026-06-18T13:31:00", "type": "mitigation", "service": "postgres-primary", "description": "Replica promoted manually."},
+      {"at": "2026-06-18T13:52:00", "type": "mitigation", "service": "auth-api", "description": "Login success rate back to baseline."}
+    ],
+    "actions": [
+      {"component": "postgres-primary", "target": "postgres_primary", "direction": "failover", "from_value": "pg-node-1", "to_value": "pg-node-2", "note": "Manual promotion."},
+      {"component": "postgres-primary", "target": "patroni_leader_ttl", "direction": "decrease", "from_value": "60", "to_value": "30", "note": "Detection window shortened."}
+    ]
+  },
+  {
+    "incident_id": "INC-1275",
+    "title": "Redis primary failover caused cross-service timeouts",
+    "summary": "A redis-cache primary node failed over. Clients that cached the topology kept dialling the old node, so payment-api, checkout-api, and auth-api all saw dependency timeouts.",
+    "severity": "SEV-2",
+    "service": "redis-cache",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-09-08T16:30:00",
+    "resolved_at": "2026-09-08T17:12:00",
+    "root_cause": "The primary shard node was terminated by the cloud provider. Failover completed in 40 seconds, but client libraries with a 300-second topology refresh kept sending writes to the old address until they were restarted.",
+    "resolution": "Failover completed automatically. Client topology refresh was lowered to 30 seconds and a second replica was added per shard.",
+    "symptoms": [
+      "dependency timeouts on payment-api, checkout-api, and auth-api at the same minute",
+      "Redis MOVED and connection refused errors",
+      "no deploy in the preceding 12 hours"
+    ],
+    "related_services": ["payment-api", "checkout-api", "auth-api"],
+    "tech_context": ["Redis 7.2 cluster mode", "Kubernetes 1.31"],
+    "events": [
+      {"at": "2026-09-08T16:30:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Primary shard node stopped accepting connections."},
+      {"at": "2026-09-08T16:31:00", "type": "error_spike", "service": "payment-api", "description": "503 rate 9% from failed Redis writes."},
+      {"at": "2026-09-08T16:32:00", "type": "alert", "service": "redis-cache", "description": "Alert REDIS-NODE-DOWN fired."},
+      {"at": "2026-09-08T16:45:00", "type": "mitigation", "service": "payment-api", "description": "Clients restarted to pick up the new topology."}
+    ],
+    "actions": [
+      {"component": "redis-cache", "target": "redis_primary", "direction": "failover", "from_value": "shard-1-a", "to_value": "shard-1-b", "note": "Automatic."},
+      {"component": "redis-cache", "target": "redis_replica_count", "direction": "increase", "from_value": "1", "to_value": "2", "note": "Per shard."}
+    ]
+  },
+  {
+    "incident_id": "INC-1255",
+    "title": "Payment API 503 errors from expired upstream certificate",
+    "summary": "payment-api returned 503 on captures because the ledger-service TLS certificate expired. No deploy was involved.",
+    "severity": "SEV-3",
+    "service": "payment-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-09-05T02:12:00",
+    "resolved_at": "2026-09-05T03:04:00",
+    "root_cause": "The ledger-service internal TLS certificate expired at 02:12. Certificate rotation had been excluded from the automation when the service moved namespaces, so nothing renewed it.",
+    "resolution": "Issued and deployed a new certificate, then re-registered the service with the rotation automation.",
+    "symptoms": [
+      "payment-api 503 on capture endpoints only",
+      "TLS handshake failures to ledger-service",
+      "no deploy in the preceding 30 hours",
+      "authorisation endpoints healthy"
+    ],
+    "related_services": ["ledger-service"],
+    "tech_context": ["cert-manager 1.15", "Kubernetes 1.31"],
+    "events": [
+      {"at": "2026-09-05T02:12:00", "type": "dependency_timeout", "service": "ledger-service", "description": "TLS handshake failures began at the exact certificate expiry minute."},
+      {"at": "2026-09-05T02:13:00", "type": "error_spike", "service": "payment-api", "description": "Capture endpoint 503 rate reached 22%."},
+      {"at": "2026-09-05T02:18:00", "type": "alert", "service": "payment-api", "description": "Alert PAY-CAPTURE-5XX fired."},
+      {"at": "2026-09-05T02:50:00", "type": "mitigation", "service": "ledger-service", "description": "New certificate deployed."}
+    ],
+    "actions": [
+      {"component": "ledger-service", "target": "tls_certificate", "direction": "patch", "from_value": "expired", "to_value": "renewed", "note": null}
+    ]
+  },
+  {
+    "incident_id": "INC-1150",
+    "title": "Postgres primary disk pressure from WAL retention",
+    "summary": "WAL files filled the primary data volume to 96%, putting the cluster minutes away from refusing writes.",
+    "severity": "SEV-2",
+    "service": "postgres-primary",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-08-20T23:50:00",
+    "resolved_at": "2026-08-21T01:10:00",
+    "root_cause": "A stalled logical replication slot stopped WAL recycling. With wal_keep_size set generously, retained WAL grew until the volume was nearly full.",
+    "resolution": "Dropped the abandoned replication slot, expanded the volume from 500GB to 1TB, and reduced wal_keep_size.",
+    "symptoms": [
+      "data volume 96% used",
+      "pg_wal directory 180GB",
+      "inactive replication slot with growing lag",
+      "write latency rising"
+    ],
+    "related_services": [],
+    "tech_context": ["Postgres 16", "Kubernetes 1.31"],
+    "events": [
+      {"at": "2026-08-20T23:50:00", "type": "alert", "service": "postgres-primary", "description": "Alert PG-DISK-PRESSURE fired at 90% used."},
+      {"at": "2026-08-21T00:20:00", "type": "latency_spike", "service": "postgres-primary", "description": "Write latency rose as the volume approached full."},
+      {"at": "2026-08-21T00:40:00", "type": "mitigation", "service": "postgres-primary", "description": "Abandoned replication slot dropped; WAL began recycling."},
+      {"at": "2026-08-21T01:10:00", "type": "mitigation", "service": "postgres-primary", "description": "Volume expanded to 1TB."}
+    ],
+    "actions": [
+      {"component": "postgres-primary", "target": "data_volume_size", "direction": "increase", "from_value": "500gb", "to_value": "1tb", "note": null},
+      {"component": "postgres-primary", "target": "wal_keep_size", "direction": "decrease", "from_value": "64gb", "to_value": "16gb", "note": null}
+    ]
+  },
+  {
+    "incident_id": "INC-1210",
+    "title": "Payment API slow queries after a dropped index",
+    "summary": "A migration dropped an index still used by the authorisation lookup, so payment-api latency rose without any error rate change.",
+    "severity": "SEV-3",
+    "service": "payment-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-08-25T08:45:00",
+    "resolved_at": "2026-08-25T09:30:00",
+    "root_cause": "Migration 2026_08_25_drop_unused_indexes removed idx_authorisations_merchant_created, which the authorisation history query still used. The planner fell back to a sequential scan over 40 million rows.",
+    "resolution": "Recreated the index concurrently and added a planner check to the migration review.",
+    "symptoms": [
+      "p99 latency 3.4x baseline with a flat error rate",
+      "Postgres sequential scans on authorisations",
+      "no Redis symptoms"
+    ],
+    "related_services": ["postgres-primary"],
+    "tech_context": ["Postgres 16", "payment-api v2.8.4"],
+    "events": [
+      {"at": "2026-08-25T08:40:00", "type": "deploy", "service": "payment-api", "description": "Ran migration 2026_08_25_drop_unused_indexes."},
+      {"at": "2026-08-25T08:45:00", "type": "latency_spike", "service": "payment-api", "description": "p99 latency rose from 180ms to 620ms."},
+      {"at": "2026-08-25T08:52:00", "type": "alert", "service": "payment-api", "description": "Alert PAY-LATENCY fired."},
+      {"at": "2026-08-25T09:20:00", "type": "mitigation", "service": "postgres-primary", "description": "Index recreated concurrently."}
+    ],
+    "actions": [
+      {"component": "postgres-primary", "target": "database_index", "direction": "patch", "from_value": "dropped", "to_value": "recreated", "note": "CREATE INDEX CONCURRENTLY."}
+    ]
+  },
+  {
+    "incident_id": "INC-1180",
+    "title": "Ledger service thread pool exhaustion after v3.1.0",
+    "summary": "ledger-service stopped accepting work after a deploy moved a blocking call onto the request thread pool.",
+    "severity": "SEV-2",
+    "service": "ledger-service",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-08-17T14:20:00",
+    "resolved_at": "2026-08-17T15:06:00",
+    "root_cause": "v3.1.0 made the settlement reconciliation call synchronously on the request thread pool. With 32 threads, a slow upstream response blocked every thread and the service queued requests until they timed out.",
+    "resolution": "Rolled back to v3.0.7, then re-released with the call moved off the request pool and the pool raised from 32 to 64 threads.",
+    "symptoms": [
+      "ledger-service request queue depth at limit",
+      "payment-api capture timeouts",
+      "thread pool active count pinned at 32"
+    ],
+    "related_services": ["payment-api", "postgres-primary"],
+    "tech_context": ["JVM 21", "Kubernetes 1.31", "ledger-service v3.1.0"],
+    "events": [
+      {"at": "2026-08-17T14:12:00", "type": "deploy", "service": "ledger-service", "description": "Deployed ledger-service v3.1.0."},
+      {"at": "2026-08-17T14:20:00", "type": "latency_spike", "service": "ledger-service", "description": "Request latency rose sharply as the thread pool filled."},
+      {"at": "2026-08-17T14:24:00", "type": "error_spike", "service": "payment-api", "description": "Capture timeouts surfaced as payment-api 503."},
+      {"at": "2026-08-17T14:28:00", "type": "alert", "service": "ledger-service", "description": "Alert LEDGER-SATURATION fired."},
+      {"at": "2026-08-17T14:41:00", "type": "mitigation", "service": "ledger-service", "description": "Rollback to v3.0.7 started."}
+    ],
+    "actions": [
+      {"component": "ledger-service", "target": "deployment_version", "direction": "rollback", "from_value": "v3.1.0", "to_value": "v3.0.7", "note": null},
+      {"component": "ledger-service", "target": "request_thread_pool_size", "direction": "increase", "from_value": "32", "to_value": "64", "note": "Secondary to moving the blocking call off the pool."}
+    ]
+  },
+  {
+    "incident_id": "INC-1290",
+    "title": "Auth API rate limiter rejected valid traffic after v4.2.0",
+    "summary": "A deploy shipped a per-tenant rate limit as a global limit, so auth-api returned 429 to most login attempts.",
+    "severity": "SEV-3",
+    "service": "auth-api",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-09-14T12:10:00",
+    "resolved_at": "2026-09-14T12:46:00",
+    "root_cause": "v4.2.0 read the rate limit from a key that lost its per-tenant scope during a config refactor. The 100 requests per second limit applied to the whole service instead of to each tenant.",
+    "resolution": "Rolled back to v4.1.6 and restored the per-tenant scope, with the effective limit raised to 1000 requests per second.",
+    "symptoms": [
+      "auth-api 429 rate 71%",
+      "login failures without any 5xx",
+      "rate limiter counter shared across tenants"
+    ],
+    "related_services": ["redis-cache"],
+    "tech_context": ["Kubernetes 1.31", "auth-api v4.2.0"],
+    "events": [
+      {"at": "2026-09-14T12:04:00", "type": "deploy", "service": "auth-api", "description": "Deployed auth-api v4.2.0."},
+      {"at": "2026-09-14T12:10:00", "type": "error_spike", "service": "auth-api", "description": "429 rate reached 71%."},
+      {"at": "2026-09-14T12:14:00", "type": "alert", "service": "auth-api", "description": "Alert AUTH-429 fired."},
+      {"at": "2026-09-14T12:32:00", "type": "mitigation", "service": "auth-api", "description": "Rollback to v4.1.6."}
+    ],
+    "actions": [
+      {"component": "auth-api", "target": "deployment_version", "direction": "rollback", "from_value": "v4.2.0", "to_value": "v4.1.6", "note": null},
+      {"component": "auth-api", "target": "rate_limit_rps", "direction": "increase", "from_value": "100", "to_value": "1000", "note": "Per tenant, restoring the original scope."}
+    ]
+  },
+  {
+    "incident_id": "INC-1023",
+    "title": "Storefront 5xx from a CDN cache rule change",
+    "summary": "A CDN rule change cached error responses, so frontend-web served stale 5xx pages after the origin had recovered.",
+    "severity": "SEV-3",
+    "service": "frontend-web",
+    "environment": "production",
+    "region": "global",
+    "started_at": "2026-07-09T11:00:00",
+    "resolved_at": "2026-07-09T11:48:00",
+    "root_cause": "A cache rule added a TTL for 5xx responses. A brief origin blip was cached and then served to every visitor for the rest of the TTL.",
+    "resolution": "Removed the 5xx caching rule and purged the CDN.",
+    "symptoms": [
+      "frontend-web error pages while the origin was healthy",
+      "CDN cache hit on 5xx responses",
+      "no backend error rate"
+    ],
+    "related_services": [],
+    "tech_context": ["CDN edge rules"],
+    "events": [
+      {"at": "2026-07-09T10:52:00", "type": "deploy", "service": "frontend-web", "description": "Applied CDN cache rule set 2026-07-09."},
+      {"at": "2026-07-09T11:00:00", "type": "error_spike", "service": "frontend-web", "description": "Visitors served cached 5xx pages."},
+      {"at": "2026-07-09T11:09:00", "type": "alert", "service": "frontend-web", "description": "Alert WEB-5XX fired."},
+      {"at": "2026-07-09T11:40:00", "type": "mitigation", "service": "frontend-web", "description": "Rule removed and cache purged."}
+    ],
+    "actions": [
+      {"component": "frontend-web", "target": "cdn_cache_rules", "direction": "reconfigure", "from_value": "cache 5xx for 60s", "to_value": "never cache 5xx", "note": null}
+    ]
+  },
+  {
+    "incident_id": "INC-0930",
+    "title": "Staging checkout rollback drill",
+    "summary": "Planned game-day exercise validating the checkout-api rollback runbook in staging.",
+    "severity": "SEV-4",
+    "service": "checkout-api",
+    "environment": "staging",
+    "region": "ap-south-1",
+    "started_at": "2026-07-28T10:00:00",
+    "resolved_at": "2026-07-28T10:34:00",
+    "root_cause": "Deliberately introduced fault during a rollback drill. Not a real defect.",
+    "resolution": "Followed RB-22 and rolled back within the target window. Two runbook steps were clarified afterwards.",
+    "symptoms": [
+      "staging checkout 5xx by design",
+      "drill timer running"
+    ],
+    "related_services": [],
+    "tech_context": ["staging cluster"],
+    "events": [
+      {"at": "2026-07-28T10:00:00", "type": "deploy", "service": "checkout-api", "description": "Deployed the faulted drill build."},
+      {"at": "2026-07-28T10:04:00", "type": "error_spike", "service": "checkout-api", "description": "Expected staging 5xx."},
+      {"at": "2026-07-28T10:20:00", "type": "mitigation", "service": "checkout-api", "description": "Rollback completed per RB-22."}
+    ],
+    "actions": [
+      {"component": "checkout-api", "target": "deployment_version", "direction": "rollback", "from_value": "drill-build", "to_value": "v5.2.1", "note": "Exercise only."}
+    ]
+  },
+  {
+    "incident_id": "INC-0860",
+    "title": "Duplicate notifications from overlapping cron runs",
+    "summary": "A long digest run overlapped the next scheduled run, so some recipients received the same digest twice.",
+    "severity": "SEV-4",
+    "service": "notification-worker",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-07-01T05:00:00",
+    "resolved_at": "2026-07-01T06:15:00",
+    "root_cause": "The digest cron had no concurrency guard. When a run exceeded its 15-minute interval, the next run started against the same unmarked rows.",
+    "resolution": "Moved the schedule to hourly and added a Redis lock so only one run can be active.",
+    "symptoms": [
+      "duplicate digest emails",
+      "two overlapping worker runs in the logs"
+    ],
+    "related_services": ["redis-cache"],
+    "tech_context": ["Kubernetes CronJob"],
+    "events": [
+      {"at": "2026-07-01T05:00:00", "type": "error_spike", "service": "notification-worker", "description": "Duplicate send rate rose above zero."},
+      {"at": "2026-07-01T05:30:00", "type": "alert", "service": "notification-worker", "description": "Support raised duplicate email reports."},
+      {"at": "2026-07-01T06:15:00", "type": "mitigation", "service": "notification-worker", "description": "Concurrency lock deployed."}
+    ],
+    "actions": [
+      {"component": "notification-worker", "target": "cron_schedule", "direction": "reconfigure", "from_value": "*/15 * * * *", "to_value": "0 * * * *", "note": "Plus a Redis lock."}
+    ]
+  },
+  {
+    "incident_id": "INC-1310",
+    "title": "Postgres autovacuum lag and table bloat",
+    "summary": "Autovacuum fell behind on the authorisations table, so bloat grew and query plans drifted.",
+    "severity": "SEV-3",
+    "service": "postgres-primary",
+    "environment": "production",
+    "region": "ap-south-1",
+    "started_at": "2026-09-18T21:00:00",
+    "resolved_at": "2026-09-19T02:30:00",
+    "root_cause": "Three autovacuum workers could not keep up with the write rate on the authorisations table after a traffic increase. Dead tuples accumulated and the planner's estimates degraded.",
+    "resolution": "Raised autovacuum_max_workers from 3 to 6, lowered the scale factor on the hot table, and ran a manual vacuum.",
+    "symptoms": [
+      "dead tuple ratio 34% on authorisations",
+      "query plans drifting between runs",
+      "table size growing faster than row count"
+    ],
+    "related_services": ["payment-api"],
+    "tech_context": ["Postgres 16"],
+    "events": [
+      {"at": "2026-09-18T21:00:00", "type": "alert", "service": "postgres-primary", "description": "Alert PG-BLOAT fired on the authorisations table."},
+      {"at": "2026-09-18T23:30:00", "type": "latency_spike", "service": "payment-api", "description": "Authorisation query latency drifted upward."},
+      {"at": "2026-09-19T01:10:00", "type": "mitigation", "service": "postgres-primary", "description": "Autovacuum workers raised and manual vacuum started."}
+    ],
+    "actions": [
+      {"component": "postgres-primary", "target": "autovacuum_max_workers", "direction": "increase", "from_value": "3", "to_value": "6", "note": null}
+    ]
+  }
+]

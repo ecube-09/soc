@@ -1,0 +1,72 @@
+[
+  {
+    "name": "frontend-web",
+    "team": "storefront",
+    "tier": "edge",
+    "description": "Customer-facing web app served through the CDN.",
+    "dependencies": ["payment-api", "checkout-api", "auth-api", "edge-cdn"]
+  },
+  {
+    "name": "checkout-api",
+    "team": "storefront",
+    "tier": "critical",
+    "description": "Cart and checkout orchestration.",
+    "dependencies": ["payment-api", "redis-cache"]
+  },
+  {
+    "name": "payment-api",
+    "team": "payments",
+    "tier": "critical",
+    "description": "Card authorisation and capture. Fronts the ledger and the PSP.",
+    "dependencies": ["redis-cache", "postgres-primary", "ledger-service"]
+  },
+  {
+    "name": "ledger-service",
+    "team": "payments",
+    "tier": "critical",
+    "description": "Double-entry ledger and settlement batches.",
+    "dependencies": ["postgres-primary"]
+  },
+  {
+    "name": "auth-api",
+    "team": "identity",
+    "tier": "critical",
+    "description": "Session issuance and token validation.",
+    "dependencies": ["postgres-primary", "redis-cache"]
+  },
+  {
+    "name": "inventory-api",
+    "team": "fulfillment",
+    "tier": "standard",
+    "description": "Inventory reservation and stock lookups.",
+    "dependencies": ["postgres-primary"]
+  },
+  {
+    "name": "notification-worker",
+    "team": "platform",
+    "tier": "standard",
+    "description": "Async email and push fan-out consumed from the Redis queue.",
+    "dependencies": ["redis-cache", "postgres-primary"]
+  },
+  {
+    "name": "redis-cache",
+    "team": "platform",
+    "tier": "critical",
+    "description": "Shared Redis cluster: sessions, rate limits, and the worker queue.",
+    "dependencies": []
+  },
+  {
+    "name": "postgres-primary",
+    "team": "database",
+    "tier": "critical",
+    "description": "Primary Postgres cluster with one streaming replica, managed by Patroni.",
+    "dependencies": []
+  },
+  {
+    "name": "edge-cdn",
+    "team": "edge",
+    "tier": "critical",
+    "description": "CDN and TLS termination at the edge.",
+    "dependencies": []
+  }
+]

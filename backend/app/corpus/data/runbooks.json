@@ -1,0 +1,192 @@
+[
+  {
+    "runbook_id": "RB-04",
+    "title": "High API error rate",
+    "trigger": "Any service reports HTTP 5xx above 5% for five consecutive minutes.",
+    "service": null,
+    "steps": [
+      "Confirm the error rate against the service dashboard rather than the alert payload alone.",
+      "List deploys and config changes in the preceding 60 minutes for the service and its direct dependencies.",
+      "Read application logs for the first minute of the spike and record the dominant error class.",
+      "Check each direct dependency for its own alerts before assuming the fault is local.",
+      "Compare current error rate with the same window on the previous day to separate a regression from a traffic shift.",
+      "If a deploy lines up with the onset, follow RB-22 for the rollback decision.",
+      "Escalate to the owning team with the timeline if no candidate cause is identified within 20 minutes."
+    ],
+    "escalate_to": "service owning team",
+    "version": "3.4",
+    "updated_at": "2026-09-01T00:00:00"
+  },
+  {
+    "runbook_id": "RB-17",
+    "title": "Payment API Redis dependency failure",
+    "trigger": "payment-api reports Redis timeouts, pool checkout failures, or connection errors.",
+    "service": "payment-api",
+    "steps": [
+      "Read the client-side pool metrics first: in-use connections, pool size, and checkout wait time per replica.",
+      "Separate app-side exhaustion from dependency-side saturation. Pool in-use equal to pool size with healthy Redis means app-side; Redis refusing connections means dependency-side.",
+      "Check redis-cache connected_clients against maxclients, and multiply the per-replica pool by the current replica count before changing either.",
+      "Check Redis server latency, evicted_keys, and memory before blaming the client.",
+      "Compare the current release against the previous one for new Redis calls per request.",
+      "Do not change pool size on the strength of a single past incident. INC-1042 raised it and INC-1198 had to reverse that. Aggregate utilisation decides which applies.",
+      "Escalate to platform if redis-cache itself is at a server-side limit."
+    ],
+    "escalate_to": "platform",
+    "version": "2.6",
+    "updated_at": "2026-09-03T00:00:00"
+  },
+  {
+    "runbook_id": "RB-09",
+    "title": "Redis connection saturation",
+    "trigger": "redis-cache reports 'max number of clients reached' or refuses new connections.",
+    "service": "redis-cache",
+    "steps": [
+      "Read connected_clients and maxclients from the Redis node and record the ratio.",
+      "Break connected_clients down by client name to find which service holds the most.",
+      "For the top consumer, compute replica count multiplied by per-replica pool size and compare it against maxclients.",
+      "Prefer reducing the oversized client pool over raising maxclients; raising the ceiling moves the limit to node memory.",
+      "Check whether a recent autoscaling event raised the replica count without a pool change.",
+      "Escalate to database on-call if the same pattern appears on pgbouncer."
+    ],
+    "escalate_to": "platform",
+    "version": "1.9",
+    "updated_at": "2026-09-10T00:00:00"
+  },
+  {
+    "runbook_id": "RB-31",
+    "title": "Redis memory pressure and key eviction",
+    "trigger": "redis-cache evicted_keys is rising or used_memory is near maxmemory.",
+    "service": "redis-cache",
+    "steps": [
+      "Read used_memory, maxmemory, and evicted_keys, and record the eviction rate per minute.",
+      "Read maxmemory-policy. Under allkeys-lru, keys without a TTL can also be evicted, including live sessions.",
+      "Identify the largest keyspaces with a sampled scan; do not run KEYS on the production node.",
+      "Check the cache hit rate of the affected service to confirm evictions and not a code change caused the misses.",
+      "Separate session data from cache data so a memory ceiling cannot drop live sessions.",
+      "Escalate to platform before raising maxmemory above the node's safe headroom."
+    ],
+    "escalate_to": "platform",
+    "version": "2.1",
+    "updated_at": "2026-09-12T00:00:00"
+  },
+  {
+    "runbook_id": "RB-12",
+    "title": "Postgres unavailable or failover stalled",
+    "trigger": "Postgres primary is unreachable, or a failover has not completed within the detection window.",
+    "service": "postgres-primary",
+    "steps": [
+      "Confirm from two vantage points that the primary is genuinely unreachable and not just slow.",
+      "Read the Patroni cluster state and check whether the leader lock is stale.",
+      "Check replica replication lag before promoting anything.",
+      "If automatic promotion has not run and lag is acceptable, promote the replica manually per the documented command.",
+      "Confirm application connection strings or the service endpoint now resolve to the new primary.",
+      "Escalate to database on-call immediately; do not promote without them on the call for SEV-1."
+    ],
+    "escalate_to": "database",
+    "version": "4.0",
+    "updated_at": "2026-06-25T00:00:00"
+  },
+  {
+    "runbook_id": "RB-14",
+    "title": "Postgres connection pool saturation",
+    "trigger": "pgbouncer rejects connections, or pool utilisation stays above 90%.",
+    "service": "postgres-primary",
+    "steps": [
+      "Read pgbouncer pool utilisation and the waiting client count.",
+      "Attribute server connections to client services and note the top consumer.",
+      "Check for a recent scale-out: replica count multiplied by per-replica pool size is the real demand.",
+      "Check for long-running or idle-in-transaction sessions holding connections.",
+      "Cap batch concurrency at the pool size rather than raising the pool to match the batch.",
+      "Escalate to database on-call before raising max_connections on the server."
+    ],
+    "escalate_to": "database",
+    "version": "2.3",
+    "updated_at": "2026-09-24T00:00:00"
+  },
+  {
+    "runbook_id": "RB-22",
+    "title": "Deployment rollback decision and procedure",
+    "trigger": "A deploy is a candidate cause for an active incident.",
+    "service": null,
+    "steps": [
+      "Establish the deploy time and the symptom onset time, and state the gap between them explicitly.",
+      "Confirm the deploy reached the replicas that are failing; a partial rollout changes the picture.",
+      "Read the diff for changes to dependency call patterns, pool sizes, timeouts, and feature flags.",
+      "If a feature flag can disable the new path, prefer that over a rollback.",
+      "Roll back to the last known good version and record the start and finish times.",
+      "Verify recovery against the same metric that triggered the alert before declaring mitigation.",
+      "Keep the rollback artefact for the postmortem; do not redeploy the suspect version to reproduce in production."
+    ],
+    "escalate_to": "release manager",
+    "version": "5.1",
+    "updated_at": "2026-08-30T00:00:00"
+  },
+  {
+    "runbook_id": "RB-27",
+    "title": "Notification queue backlog",
+    "trigger": "Queue depth is growing monotonically, or delivery lag exceeds five minutes.",
+    "service": "notification-worker",
+    "steps": [
+      "Read queue depth, enqueue rate, and drain rate; a backlog needs the difference, not the depth alone.",
+      "Check whether a campaign or batch job is enqueueing above the normal rate.",
+      "Check worker error rates before scaling; failing workers do not drain faster when multiplied.",
+      "Before scaling out, compute the Postgres and Redis connections the new replica count will hold.",
+      "Scale out only within the dependency connection budget. INC-1120 scaled out and INC-1320 had to scale back in for that reason.",
+      "Escalate to platform if the backlog persists at the connection budget ceiling."
+    ],
+    "escalate_to": "platform",
+    "version": "1.7",
+    "updated_at": "2026-09-23T00:00:00"
+  },
+  {
+    "runbook_id": "RB-35",
+    "title": "TLS certificate expiry response",
+    "trigger": "TLS handshake failures between services, or a certificate within 72 hours of expiry.",
+    "service": null,
+    "steps": [
+      "Read the certificate expiry on the failing endpoint and compare it against the symptom onset minute.",
+      "An onset that lands exactly on an expiry timestamp and no deploy nearby points away from a release.",
+      "Check whether the service is registered with the rotation automation.",
+      "Issue and deploy a replacement certificate through the normal pipeline.",
+      "Re-register the service for rotation and confirm the next renewal date.",
+      "Escalate to platform if the automation silently skipped the service."
+    ],
+    "escalate_to": "platform",
+    "version": "1.4",
+    "updated_at": "2026-09-06T00:00:00"
+  },
+  {
+    "runbook_id": "RB-40",
+    "title": "Slow query triage",
+    "trigger": "Latency rises while the error rate stays flat, and the service is database-backed.",
+    "service": "postgres-primary",
+    "steps": [
+      "Confirm the error rate is flat; latency without errors usually means the work got slower, not that it failed.",
+      "Read pg_stat_statements for the queries whose mean time changed most against the previous day.",
+      "Run EXPLAIN on the top offender and look for a sequential scan where an index scan is expected.",
+      "Check recent migrations for dropped or renamed indexes.",
+      "Check autovacuum lag and dead tuple ratio on the hot tables.",
+      "Recreate a missing index with CREATE INDEX CONCURRENTLY; escalate to database on-call for anything that locks."
+    ],
+    "escalate_to": "database",
+    "version": "3.0",
+    "updated_at": "2026-08-27T00:00:00"
+  },
+  {
+    "runbook_id": "RB-45",
+    "title": "Auth API rate limiting and 429 responses",
+    "trigger": "auth-api returns HTTP 429 above 1% of requests.",
+    "service": "auth-api",
+    "steps": [
+      "Confirm the responses are 429 and not 5xx; a limiter fault and a service fault need different paths.",
+      "Read the effective rate limit value and, critically, its scope. Global versus per-tenant is the usual defect.",
+      "Check whether a deploy or config refresh changed the limiter key.",
+      "Look for a single tenant driving the traffic before widening the limit for everyone.",
+      "Restore the intended scope rather than raising the number.",
+      "Escalate to identity if the limiter counter store itself is unreachable."
+    ],
+    "escalate_to": "identity",
+    "version": "1.2",
+    "updated_at": "2026-09-15T00:00:00"
+  }
+]

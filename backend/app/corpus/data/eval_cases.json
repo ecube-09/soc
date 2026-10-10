@@ -1,0 +1,167 @@
+[
+  {
+    "case_id": "CUR-2051",
+    "note": "Strong match. Same service and environment as INC-1042 with a near-identical relative timeline. INC-0995 is the staging distractor and INC-0412 is the stale near-duplicate.",
+    "incident": {
+      "title": "Payment API returning 503 errors after v2.8.1 rollout",
+      "description": "payment-api started returning HTTP 503 on authorisation requests about seven minutes after v2.8.1 went out. Redis connection timeout errors are appearing in the application logs. Redis server dashboards look normal.",
+      "service": "payment-api",
+      "environment": "production",
+      "severity": "SEV-2",
+      "region": "ap-south-1",
+      "started_at": "2026-09-27T14:09:00",
+      "symptoms": [
+        "HTTP 503 rate 34%",
+        "p99 latency 3.8x baseline",
+        "redis client timeout waiting for connection from pool",
+        "Redis server CPU and memory normal"
+      ],
+      "suspected_dependencies": ["redis-cache"],
+      "tech_context": ["Redis 7.2", "Kubernetes 1.31", "payment-api v2.8.1"],
+      "events": [
+        {"at": "2026-09-27T14:02:00", "type": "deploy", "service": "payment-api", "description": "Deployed payment-api v2.8.1 to production."},
+        {"at": "2026-09-27T14:09:00", "type": "error_spike", "service": "payment-api", "description": "503 rate crossed 5% and climbed to 34%."},
+        {"at": "2026-09-27T14:11:00", "type": "latency_spike", "service": "payment-api", "description": "p99 latency rose from 185ms to 700ms."},
+        {"at": "2026-09-27T14:14:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Redis pool checkout timeouts in the application logs."},
+        {"at": "2026-09-27T14:18:00", "type": "alert", "service": "payment-api", "description": "Alert PAY-5XX paged the payments on-call."}
+      ],
+      "log_excerpt": "14:13:58 WARN  redis.pool  checkout wait 2010ms pool=50/50 waiters=57\n14:14:02 ERROR redis.pool  TimeoutError: timeout waiting for connection from pool\n14:14:02 ERROR http       POST /v1/authorisations -> 503 (upstream_unavailable)\n14:14:20 INFO  redis.stats server_ok=true connected_clients=418 maxclients=1500"
+    },
+    "expected": {
+      "mode": "investigation",
+      "incident_ids": ["INC-1042"],
+      "runbook_ids": ["RB-17"],
+      "stale_ids": ["INC-0412"],
+      "excluded_ids": ["INC-0995"],
+      "conflict_targets": ["redis_connection_pool_size"]
+    }
+  },
+  {
+    "case_id": "CUR-2052",
+    "note": "Weak case. Unknown service, vague symptoms, no timeline. Must escalate rather than name a cause.",
+    "incident": {
+      "title": "Intermittent 500s on the reporting API",
+      "description": "Someone in support mentioned the reporting screens are sometimes slow or error out. We do not have dashboards for this service and nobody remembers a recent change.",
+      "service": "reporting-api",
+      "environment": "production",
+      "severity": "SEV-3",
+      "region": "ap-south-1",
+      "symptoms": ["occasional errors reported by users"],
+      "suspected_dependencies": [],
+      "tech_context": [],
+      "events": []
+    },
+    "expected": {
+      "mode": "escalation",
+      "incident_ids": [],
+      "runbook_ids": [],
+      "stale_ids": [],
+      "excluded_ids": [],
+      "conflict_targets": []
+    }
+  },
+  {
+    "case_id": "CUR-2053",
+    "note": "Memory pressure case. Latency with a flat error rate, so the deploy-shaped incidents should not win.",
+    "incident": {
+      "title": "Checkout latency tripled, cart cache misses climbing",
+      "description": "checkout-api p99 latency has tripled over the last half hour. The cart cache hit rate has collapsed and Postgres read volume has doubled. No deploy today.",
+      "service": "checkout-api",
+      "environment": "production",
+      "severity": "SEV-3",
+      "region": "ap-south-1",
+      "started_at": "2026-09-27T20:05:00",
+      "symptoms": [
+        "p99 latency 3.2x baseline",
+        "cart cache hit rate fell from 93% to 41%",
+        "Redis evicted_keys rising",
+        "error rate flat"
+      ],
+      "suspected_dependencies": ["redis-cache"],
+      "tech_context": ["Redis 7.2", "maxmemory-policy allkeys-lru"],
+      "events": [
+        {"at": "2026-09-27T20:05:00", "type": "latency_spike", "service": "checkout-api", "description": "p99 latency rose from 205ms to 660ms."},
+        {"at": "2026-09-27T20:12:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Slow GETs and rising cache misses."},
+        {"at": "2026-09-27T20:19:00", "type": "alert", "service": "checkout-api", "description": "Alert CHECKOUT-LATENCY fired."}
+      ],
+      "log_excerpt": "20:11:40 INFO redis.stats used_memory=3.97G maxmemory=4.00G evicted_keys=96311 policy=allkeys-lru\n20:12:05 WARN cart.cache miss ratio 59% over the last minute"
+    },
+    "expected": {
+      "mode": "investigation",
+      "incident_ids": ["INC-1301"],
+      "runbook_ids": ["RB-31"],
+      "stale_ids": [],
+      "excluded_ids": [],
+      "conflict_targets": []
+    }
+  },
+  {
+    "case_id": "CUR-2054",
+    "note": "Dependency outage. Total failure with an unreachable Postgres primary points at INC-0778, not at any deploy.",
+    "incident": {
+      "title": "All logins failing, Postgres primary unreachable",
+      "description": "auth-api is returning 500 for every session request. The Postgres primary is not answering health checks and the cluster still shows the old node as leader. No deploy in the last day.",
+      "service": "auth-api",
+      "environment": "production",
+      "severity": "SEV-1",
+      "region": "ap-south-1",
+      "started_at": "2026-09-27T09:31:00",
+      "symptoms": [
+        "auth-api 5xx rate 100%",
+        "Postgres primary unreachable",
+        "cluster leader lock appears stale",
+        "no automatic promotion"
+      ],
+      "suspected_dependencies": ["postgres-primary"],
+      "tech_context": ["Postgres 16", "Patroni 3.2"],
+      "events": [
+        {"at": "2026-09-27T09:31:00", "type": "dependency_timeout", "service": "postgres-primary", "description": "Primary stopped answering health checks."},
+        {"at": "2026-09-27T09:32:00", "type": "error_spike", "service": "auth-api", "description": "5xx rate reached 100%."},
+        {"at": "2026-09-27T09:33:00", "type": "alert", "service": "auth-api", "description": "Alert AUTH-DOWN paged identity and database on-call."}
+      ],
+      "log_excerpt": "09:31:12 ERROR db      connection to pg-node-1:5432 failed: no route to host\n09:32:40 WARN  patroni cluster state: leader=pg-node-1 (lock held, last seen 81s ago)"
+    },
+    "expected": {
+      "mode": "investigation",
+      "incident_ids": ["INC-0778"],
+      "runbook_ids": ["RB-12"],
+      "stale_ids": [],
+      "excluded_ids": [],
+      "conflict_targets": []
+    }
+  },
+  {
+    "case_id": "CUR-2055",
+    "note": "Second conflict pair. INC-1120 scaled workers out and INC-1320 had to scale them back in.",
+    "incident": {
+      "title": "Notification backlog growing during a campaign send",
+      "description": "notification-worker is falling behind the Redis queue during a campaign. Queue depth is climbing and delivery lag is past fifteen minutes. Someone has suggested adding replicas.",
+      "service": "notification-worker",
+      "environment": "production",
+      "severity": "SEV-3",
+      "region": "ap-south-1",
+      "started_at": "2026-09-27T06:40:00",
+      "symptoms": [
+        "queue depth 165,000 and rising",
+        "delivery lag 17 minutes",
+        "worker Redis BRPOP timeouts",
+        "enqueue rate above drain rate"
+      ],
+      "suspected_dependencies": ["redis-cache", "postgres-primary"],
+      "tech_context": ["Redis 7.2", "Kubernetes 1.31", "5 worker replicas"],
+      "events": [
+        {"at": "2026-09-27T06:40:00", "type": "latency_spike", "service": "notification-worker", "description": "Delivery lag crossed five minutes."},
+        {"at": "2026-09-27T06:52:00", "type": "dependency_timeout", "service": "redis-cache", "description": "Worker BRPOP calls timing out."},
+        {"at": "2026-09-27T06:58:00", "type": "alert", "service": "notification-worker", "description": "Alert NOTIFY-LAG fired."}
+      ]
+    },
+    "expected": {
+      "mode": "investigation",
+      "incident_ids": ["INC-1120", "INC-1320"],
+      "runbook_ids": ["RB-27"],
+      "stale_ids": [],
+      "excluded_ids": [],
+      "conflict_targets": ["worker_replica_count"]
+    }
+  }
+]

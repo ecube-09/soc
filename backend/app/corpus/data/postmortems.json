@@ -1,0 +1,137 @@
+[
+  {
+    "postmortem_id": "PM-1042",
+    "incident_id": "INC-1042",
+    "root_cause": "v2.8.1 added an idempotency lookup that issued two extra Redis calls per authorisation. The client pool stayed at 50 connections per replica, so under normal traffic every connection was checked out and requests blocked on pool checkout until the service shed them as 503. Redis itself was healthy throughout: server CPU, memory, and connected_clients were all normal.",
+    "impact": "43 minutes of degraded payment authorisation. 38% of requests failed at peak. An estimated 14,000 authorisation attempts were rejected.",
+    "resolution": "Rolled back to v2.8.0 within 20 minutes of onset, then re-released as v2.8.2 with the Redis client pool raised from 50 to 100 connections per replica.",
+    "lessons_learned": [
+      "A change in calls per request is a change in pool demand and should be reviewed as one.",
+      "Pool exhaustion on the client looks identical to dependency failure in the error rate; only the pool metrics separate them.",
+      "The pool increase was sized per replica. Aggregate demand across replicas was not considered, which caused INC-1198 three weeks later."
+    ],
+    "written_at": "2026-08-16T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-1198",
+    "incident_id": "INC-1198",
+    "root_cause": "The per-replica pool of 100 from INC-1042 was multiplied by 14 replicas after an autoscaling event, so payment-api alone held 1,400 of the 1,500 configured Redis maxclients. redis-cache then refused connections to every other client, which is why checkout-api and notification-worker failed at the same time.",
+    "impact": "51 minutes of degraded payments and checkout. Notification delivery was delayed by roughly 20 minutes.",
+    "resolution": "Reduced the payment-api Redis client pool from 100 to 30 per replica. maxclients was left unchanged on purpose, because raising it would move the limit to node memory instead of removing it.",
+    "lessons_learned": [
+      "This incident is the direct counterpart to INC-1042: the same knob, moved the opposite way, for a different reason.",
+      "The distinguishing signal is where the limit is hit. App-side exhaustion shows pool in-use at pool size with Redis healthy. Dependency-side saturation shows Redis refusing connections and multiple unrelated clients failing together.",
+      "Pool sizing must be expressed as replica count multiplied by per-replica pool, checked against the dependency ceiling."
+    ],
+    "written_at": "2026-09-04T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-0412",
+    "incident_id": "INC-0412",
+    "root_cause": "payment-api v1.4.2 opened one Redis connection per worker thread rather than sharing a pool. The single Redis 5 node reached maxclients at 4000 and refused further connections.",
+    "impact": "57 minutes of degraded payments on the platform as it existed in 2022.",
+    "resolution": "maxclients was raised from 4000 to 10000 in redis.conf and the node was restarted during a maintenance window.",
+    "lessons_learned": [
+      "The remediation here is specific to a single-node Redis 5 deployment edited through redis.conf and restarted. The current cluster runs Redis 7.2 in cluster mode with managed configuration, so neither the edit nor the restart applies as written.",
+      "The diagnostic reasoning still transfers: establish whether the connection limit is being hit on the client or on the server.",
+      "Connection-per-thread was the real defect and was fixed in a later release."
+    ],
+    "written_at": "2022-03-15T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-0871",
+    "incident_id": "INC-0871",
+    "root_cause": "A shard split raised settlement batch concurrency from 32 to 64 workers, each holding a connection, while the pgbouncer pool stayed at 40. Half the workers blocked on connection checkout.",
+    "impact": "The settlement batch ran 52 minutes past its SLA. payment-api capture latency was raised for the duration.",
+    "resolution": "pgbouncer pool raised from 40 to 80, and batch concurrency capped at the pool size so the two cannot drift apart again.",
+    "lessons_learned": [
+      "Any change to worker or shard count is a change to connection demand.",
+      "Capping concurrency at the pool size is more durable than raising the pool to match the batch."
+    ],
+    "written_at": "2026-07-24T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-1301",
+    "incident_id": "INC-1301",
+    "root_cause": "redis-cache reached its 4GB maxmemory limit. The allkeys-lru policy allowed eviction of keys without a TTL, which included live cart sessions, so checkout-api rebuilt carts from Postgres on most requests.",
+    "impact": "45 minutes of raised checkout latency. A small number of carts lost in-progress state.",
+    "resolution": "maxmemory raised from 4GB to 8GB, and cart sessions moved to a logical database with volatile-lru so only keys with a TTL can be evicted.",
+    "lessons_learned": [
+      "Session data and cache data should not share an eviction policy.",
+      "A falling cache hit rate with a rising eviction count points at memory pressure rather than a code change."
+    ],
+    "written_at": "2026-09-13T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-1120",
+    "incident_id": "INC-1120",
+    "root_cause": "Four worker replicas could not drain a campaign enqueueing 9,000 messages per minute. The drain rate was below the enqueue rate for the whole send, so queue depth grew monotonically.",
+    "impact": "Notification delivery lagged by up to 40 minutes for roughly 210,000 messages.",
+    "resolution": "Scaled notification-worker from 4 to 10 replicas and added a queue-depth autoscaler.",
+    "lessons_learned": [
+      "Backlog is a rate problem. Queue depth alone does not tell you whether it will drain.",
+      "The scale-out was sized against Redis throughput only. Postgres connection demand at 10 replicas was not checked, which caused INC-1320."
+    ],
+    "written_at": "2026-08-05T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-1320",
+    "incident_id": "INC-1320",
+    "root_cause": "Ten notification-worker replicas, each with a 20-connection Postgres pool, overlapped the settlement batch and left pgbouncer with no free server connections. ledger-service writes then timed out.",
+    "impact": "53 minutes of ledger write failures overnight and a 12-minute notification delay.",
+    "resolution": "Reduced notification-worker from 10 to 5 replicas and moved the campaign send outside the settlement window.",
+    "lessons_learned": [
+      "This reverses the scale-out from INC-1120. The two are not contradictory advice so much as two different binding constraints: queue drain rate and dependency connection budget.",
+      "Scale-out decisions need a connection budget alongside the throughput target."
+    ],
+    "written_at": "2026-09-24T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-0778",
+    "incident_id": "INC-0778",
+    "root_cause": "The Postgres primary lost its storage volume. Patroni held a stale leader lock because the leader TTL exceeded the detection window, so automatic promotion never ran and auth-api could not issue sessions.",
+    "impact": "26 minutes of total login failure across all surfaces. SEV-1.",
+    "resolution": "The replica was promoted manually. Patroni leader TTL and loop interval were then lowered so detection completes inside the alerting window.",
+    "lessons_learned": [
+      "An automatic failover that has not been exercised is not a failover.",
+      "Total outage of a dependency and total outage of a service look the same from the service's own metrics. Check the dependency directly."
+    ],
+    "written_at": "2026-06-20T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-1275",
+    "incident_id": "INC-1275",
+    "root_cause": "The primary shard node was terminated by the cloud provider. Failover completed in 40 seconds, but client libraries refreshed topology every 300 seconds and kept writing to the old address until they were restarted.",
+    "impact": "42 minutes of intermittent dependency timeouts across payment-api, checkout-api, and auth-api.",
+    "resolution": "Client topology refresh lowered to 30 seconds; a second replica added per shard.",
+    "lessons_learned": [
+      "Several unrelated services failing in the same minute points at a shared dependency, not at any one service.",
+      "The absence of a deploy in the preceding hours is itself evidence worth stating."
+    ],
+    "written_at": "2026-09-10T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-1180",
+    "incident_id": "INC-1180",
+    "root_cause": "v3.1.0 moved settlement reconciliation onto the request thread pool as a synchronous call. A slow upstream response occupied all 32 threads, so the service queued requests until they timed out.",
+    "impact": "46 minutes of ledger unavailability, surfacing to customers as payment-api capture failures.",
+    "resolution": "Rolled back to v3.0.7, then re-released with the call moved off the request pool. The pool was also raised from 32 to 64 threads.",
+    "lessons_learned": [
+      "Raising the pool was secondary. Moving the blocking call off the request path was the fix.",
+      "A saturated thread pool surfaces in the caller's error rate, not in the saturated service's, which sends investigations to the wrong team."
+    ],
+    "written_at": "2026-08-19T00:00:00"
+  },
+  {
+    "postmortem_id": "PM-1150",
+    "incident_id": "INC-1150",
+    "root_cause": "A stalled logical replication slot stopped WAL recycling. With a generous wal_keep_size, retained WAL grew until the data volume reached 96%.",
+    "impact": "No outage. The cluster was approximately 40 minutes from refusing writes when the slot was dropped.",
+    "resolution": "Dropped the abandoned slot, expanded the volume from 500GB to 1TB, and reduced wal_keep_size.",
+    "lessons_learned": [
+      "An inactive replication slot is a disk leak and should alert on its own.",
+      "Disk growth faster than data growth is the signal to look at WAL rather than at tables."
+    ],
+    "written_at": "2026-08-22T00:00:00"
+  }
+]
